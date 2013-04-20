@@ -1,4 +1,4 @@
-# For multiarch crosscompile, i.e. x86_32 target on x86_64 host
+# For multiarch gcc crosscompile, i.e. x86_32 target on x86_64 host
 
 set(CMAKE_SYSTEM_PROCESSOR "x86")
 
