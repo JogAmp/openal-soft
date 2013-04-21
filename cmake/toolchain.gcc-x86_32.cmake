@@ -4,7 +4,7 @@ set(CMAKE_SYSTEM_PROCESSOR "x86")
 
 link_directories("/usr/lib32")
 
-set(CMAKE_C_FLAGS "-m32")
+set(CMAKE_C_FLAGS "-m32 -include ${CMAKE_MODULE_PATH}/glibc-compat-symbols.h")
 
 set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS}" CACHE STRING "c++ flags")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}" CACHE STRING "c flags")
