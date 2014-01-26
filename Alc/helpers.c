@@ -28,6 +28,7 @@
 #include <malloc.h>
 #endif
 
+#ifndef AL_NO_UID_DEFS
 #if defined(HAVE_GUIDDEF_H) || defined(HAVE_INITGUID_H)
 #define INITGUID
 #include <windows.h>
@@ -52,11 +53,16 @@ DEFINE_GUID(IID_IAudioRenderClient,   0xf294acfc, 0x3146, 0x4483, 0xa7,0xbf, 0xa
 DEFINE_DEVPROPKEY(DEVPKEY_Device_FriendlyName, 0xa45c254e, 0xdf1c, 0x4efd, 0x80,0x20, 0x67,0xd1,0x46,0xa8,0x50,0xe0, 14);
 #endif
 #endif
+#endif /* AL_NO_UID_DEFS */
+
 #ifdef HAVE_DLFCN_H
 #include <dlfcn.h>
 #endif
 #ifdef HAVE_CPUID_H
 #include <cpuid.h>
+#endif
+#ifdef HAVE_SYS_SYSCONF_H
+#include <sys/sysconf.h>
 #endif
 #ifdef HAVE_FLOAT_H
 #include <float.h>
@@ -66,6 +72,27 @@ DEFINE_DEVPROPKEY(DEVPKEY_Device_FriendlyName, 0xa45c254e, 0xdf1c, 0x4efd, 0x80,
 #endif
 
 #include "alMain.h"
+#include "atomic.h"
+#include "uintmap.h"
+#include "compat.h"
+
+
+extern inline RefCount IncrementRef(volatile RefCount *ptr);
+extern inline RefCount DecrementRef(volatile RefCount *ptr);
+extern inline int ExchangeInt(volatile int *ptr, int newval);
+extern inline void *ExchangePtr(XchgPtr *ptr, void *newval);
+extern inline ALboolean CompExchangeInt(volatile int *ptr, int oldval, int newval);
+extern inline ALboolean CompExchangePtr(XchgPtr *ptr, void *oldval, void *newval);
+
+extern inline void LockUIntMapRead(UIntMap *map);
+extern inline void UnlockUIntMapRead(UIntMap *map);
+extern inline void LockUIntMapWrite(UIntMap *map);
+extern inline void UnlockUIntMapWrite(UIntMap *map);
+
+extern inline ALuint NextPowerOf2(ALuint value);
+extern inline ALint fastf2i(ALfloat f);
+extern inline ALuint fastf2u(ALfloat f);
+
 
 ALuint CPUCapFlags = 0;
 
@@ -104,10 +131,12 @@ void FillCPUCaps(ALuint capfilter)
         if(maxfunc >= 1 &&
            __get_cpuid(1, &cpuinf[0].regs[0], &cpuinf[0].regs[1], &cpuinf[0].regs[2], &cpuinf[0].regs[3]))
         {
-#ifdef bit_SSE
-            if((cpuinf[0].regs[3]&bit_SSE))
+            if((cpuinf[0].regs[3]&(1<<25)))
+            {
                 caps |= CPU_CAP_SSE;
-#endif
+                if((cpuinf[0].regs[3]&(1<<26)))
+                    caps |= CPU_CAP_SSE2;
+            }
         }
     }
 #elif defined(HAVE_WINDOWS_H)
@@ -119,7 +148,11 @@ void FillCPUCaps(ALuint capfilter)
     else
     {
         if(IsProcessorFeaturePresent(PF_XMMI_INSTRUCTIONS_AVAILABLE))
+        {
             caps |= CPU_CAP_SSE;
+            if(IsProcessorFeaturePresent(PF_XMMI64_INSTRUCTIONS_AVAILABLE))
+                caps |= CPU_CAP_SSE2;
+        }
     }
 #endif
 #ifdef HAVE_NEON
@@ -127,9 +160,10 @@ void FillCPUCaps(ALuint capfilter)
     caps |= CPU_CAP_NEON;
 #endif
 
-    TRACE("Got caps:%s%s%s\n", ((caps&CPU_CAP_SSE)?((capfilter&CPU_CAP_SSE)?" SSE":" (SSE)"):""),
-                               ((caps&CPU_CAP_NEON)?((capfilter&CPU_CAP_NEON)?" Neon":" (Neon)"):""),
-                               ((!caps)?" -none-":""));
+    TRACE("Got caps:%s%s%s%s\n", ((caps&CPU_CAP_SSE)?((capfilter&CPU_CAP_SSE)?" SSE":" (SSE)"):""),
+                                 ((caps&CPU_CAP_SSE2)?((capfilter&CPU_CAP_SSE2)?" SSE2":" (SSE2)"):""),
+                                 ((caps&CPU_CAP_NEON)?((capfilter&CPU_CAP_NEON)?" Neon":" (Neon)"):""),
+                                 ((!caps)?" -none-":""));
     CPUCapFlags = caps & capfilter;
 }
 
@@ -192,25 +226,30 @@ void al_free(void *ptr)
 
 void SetMixerFPUMode(FPUCtl *ctl)
 {
-#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
-    unsigned short fpuState;
-    __asm__ __volatile__("fnstcw %0" : "=m" (*&fpuState));
-    ctl->state = fpuState;
-    fpuState &= ~0x300; /* clear precision to single */
-    fpuState |=  0xC00; /* set round-to-zero */
-    __asm__ __volatile__("fldcw %0" : : "m" (*&fpuState));
-#ifdef HAVE_SSE
+#ifdef HAVE_FENV_H
+    fegetenv(STATIC_CAST(fenv_t, ctl));
+#if defined(__GNUC__) && defined(HAVE_SSE)
+    if((CPUCapFlags&CPU_CAP_SSE))
+        __asm__ __volatile__("stmxcsr %0" : "=m" (*&ctl->sse_state));
+#endif
+
+#ifdef FE_TOWARDZERO
+    fesetround(FE_TOWARDZERO);
+#endif
+#if defined(__GNUC__) && defined(HAVE_SSE)
     if((CPUCapFlags&CPU_CAP_SSE))
     {
-        int sseState;
-        __asm__ __volatile__("stmxcsr %0" : "=m" (*&sseState));
-        ctl->sse_state = sseState;
-        sseState |= 0x0C00; /* set round-to-zero */
+        int sseState = ctl->sse_state;
+        sseState |= 0x6000; /* set round-to-zero */
         sseState |= 0x8000; /* set flush-to-zero */
+        if((CPUCapFlags&CPU_CAP_SSE2))
+            sseState |= 0x0040; /* set denormals-are-zero */
         __asm__ __volatile__("ldmxcsr %0" : : "m" (*&sseState));
     }
 #endif
+
 #elif defined(HAVE___CONTROL87_2)
+
     int mode;
     __control87_2(0, 0, &ctl->state, NULL);
     __control87_2(_RC_CHOP|_PC_24, _MCW_RC|_MCW_PC, &mode, NULL);
@@ -221,54 +260,54 @@ void SetMixerFPUMode(FPUCtl *ctl)
         __control87_2(_RC_CHOP|_DN_FLUSH, _MCW_RC|_MCW_DN, NULL, &mode);
     }
 #endif
+
 #elif defined(HAVE__CONTROLFP)
+
     ctl->state = _controlfp(0, 0);
     (void)_controlfp(_RC_CHOP|_PC_24, _MCW_RC|_MCW_PC);
-#elif defined(HAVE_FESETROUND)
-    ctl->state = fegetround();
-#ifdef FE_TOWARDZERO
-    fesetround(FE_TOWARDZERO);
-#endif
 #endif
 }
 
 void RestoreFPUMode(const FPUCtl *ctl)
 {
-#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
-    unsigned short fpuState = ctl->state;
-    __asm__ __volatile__("fldcw %0" : : "m" (*&fpuState));
-#ifdef HAVE_SSE
+#ifdef HAVE_FENV_H
+    fesetenv(STATIC_CAST(fenv_t, ctl));
+#if defined(__GNUC__) && defined(HAVE_SSE)
     if((CPUCapFlags&CPU_CAP_SSE))
         __asm__ __volatile__("ldmxcsr %0" : : "m" (*&ctl->sse_state));
 #endif
+
 #elif defined(HAVE___CONTROL87_2)
+
     int mode;
     __control87_2(ctl->state, _MCW_RC|_MCW_PC, &mode, NULL);
 #ifdef HAVE_SSE
     if((CPUCapFlags&CPU_CAP_SSE))
         __control87_2(ctl->sse_state, _MCW_RC|_MCW_DN, NULL, &mode);
 #endif
+
 #elif defined(HAVE__CONTROLFP)
+
     _controlfp(ctl->state, _MCW_RC|_MCW_PC);
-#elif defined(HAVE_FESETROUND)
-    fesetround(ctl->state);
 #endif
 }
 
 
 #ifdef _WIN32
-void pthread_once(pthread_once_t *once, void (*callback)(void))
+extern inline int alsched_yield(void);
+
+void althread_once(althread_once_t *once, void (*callback)(void))
 {
     LONG ret;
     while((ret=InterlockedExchange(once, 1)) == 1)
-        sched_yield();
+        alsched_yield();
     if(ret == 0)
         callback();
     InterlockedExchange(once, 2);
 }
 
 
-int pthread_key_create(pthread_key_t *key, void (*callback)(void*))
+int althread_key_create(althread_key_t *key, void (*callback)(void*))
 {
     *key = TlsAlloc();
     if(callback)
@@ -276,17 +315,17 @@ int pthread_key_create(pthread_key_t *key, void (*callback)(void*))
     return 0;
 }
 
-int pthread_key_delete(pthread_key_t key)
+int althread_key_delete(althread_key_t key)
 {
     InsertUIntMapEntry(&TlsDestructor, key, NULL);
     TlsFree(key);
     return 0;
 }
 
-void *pthread_getspecific(pthread_key_t key)
+void *althread_getspecific(althread_key_t key)
 { return TlsGetValue(key); }
 
-int pthread_setspecific(pthread_key_t key, void *val)
+int althread_setspecific(althread_key_t key, void *val)
 {
     TlsSetValue(key, val);
     return 0;
@@ -330,6 +369,8 @@ WCHAR *strdupW(const WCHAR *str)
 #include <pthread_np.h>
 #endif
 #include <sched.h>
+#include <time.h>
+#include <sys/time.h>
 
 void InitializeCriticalSection(CRITICAL_SECTION *cs)
 {
@@ -449,20 +490,13 @@ void *GetSymbol(void *handle, const char *name)
 
 void al_print(const char *type, const char *func, const char *fmt, ...)
 {
-    char str[256];
-    int i;
+    va_list ap;
 
-    i = snprintf(str, sizeof(str), "AL lib: %s %s: ", type, func);
-    if(i > 0 && (unsigned int)i < sizeof(str))
-    {
-        va_list ap;
-        va_start(ap, fmt);
-        vsnprintf(str+i, sizeof(str)-i, fmt, ap);
-        va_end(ap);
-    }
-    str[sizeof(str)-1] = 0;
+    va_start(ap, fmt);
+    fprintf(LogFile, "AL lib: %s %s: ", type, func);
+    vfprintf(LogFile, fmt, ap);
+    va_end(ap);
 
-    fprintf(LogFile, "%s", str);
     fflush(LogFile);
 }
 
@@ -495,7 +529,7 @@ void SetRTPriority(void)
 static void Lock(volatile ALenum *l)
 {
     while(ExchangeInt(l, AL_TRUE) == AL_TRUE)
-        sched_yield();
+        alsched_yield();
 }
 
 static void Unlock(volatile ALenum *l)

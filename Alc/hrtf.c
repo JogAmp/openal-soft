@@ -92,7 +92,7 @@ static void CalcEvIndices(const struct Hrtf *Hrtf, ALfloat ev, ALuint *evidx, AL
  */
 static void CalcAzIndices(const struct Hrtf *Hrtf, ALuint evidx, ALfloat az, ALuint *azidx, ALfloat *azmu)
 {
-    az = (F_PI*2.0f + az) * Hrtf->azCount[evidx] / (F_PI*2.0f);
+    az = (F_2PI + az) * Hrtf->azCount[evidx] / (F_2PI);
     azidx[0] = fastf2u(az) % Hrtf->azCount[evidx];
     azidx[1] = (azidx[0] + 1) % Hrtf->azCount[evidx];
     *azmu = az - floorf(az);
@@ -781,6 +781,30 @@ const struct Hrtf *GetHrtf(ALCdevice *device)
     ERR("Incompatible format: %s %uhz\n",
         DevFmtChannelsString(device->FmtChans), device->Frequency);
     return NULL;
+}
+
+void FindHrtfFormat(const ALCdevice *device, enum DevFmtChannels *chans, ALCuint *srate)
+{
+    const struct Hrtf *hrtf = &DefaultHrtf;
+
+    if(device->Frequency != DefaultHrtf.sampleRate)
+    {
+        hrtf = LoadedHrtfs;
+        while(hrtf != NULL)
+        {
+            if(device->Frequency == hrtf->sampleRate)
+                break;
+            hrtf = hrtf->next;
+        }
+
+        if(hrtf == NULL)
+            hrtf = LoadHrtf(device->Frequency);
+        if(hrtf == NULL)
+            hrtf = &DefaultHrtf;
+    }
+
+    *chans = DevFmtStereo;
+    *srate = hrtf->sampleRate;
 }
 
 void FreeHrtfs(void)

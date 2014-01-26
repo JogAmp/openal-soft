@@ -40,6 +40,8 @@
 
 #include "alMain.h"
 #include "alu.h"
+#include "threads.h"
+#include "compat.h"
 
 
 DEFINE_GUID(KSDATAFORMAT_SUBTYPE_PCM, 0x00000001, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71);
@@ -69,7 +71,7 @@ typedef struct {
     volatile UINT32 Padding;
 
     volatile int killNow;
-    ALvoid *thread;
+    althread_t thread;
 } MMDevApiData;
 
 
@@ -218,7 +220,7 @@ static DevMap *ProbeDevices(IMMDeviceEnumerator *devenum, EDataFlow flowdir, ALu
 }
 
 
-static ALuint MMDevApiProc(ALvoid *ptr)
+FORCE_ALIGN static ALuint MMDevApiProc(ALvoid *ptr)
 {
     ALCdevice *device = ptr;
     MMDevApiData *data = device->ExtraData;
@@ -238,6 +240,7 @@ static ALuint MMDevApiProc(ALvoid *ptr)
     }
 
     SetRTPriority();
+    SetThreadName(MIXER_THREAD_NAME);
 
     update_size = device->UpdateSize;
     buffer_len = update_size * device->NumUpdates;
@@ -676,8 +679,7 @@ static DWORD CALLBACK MMDevApiMsgProc(void *ptr)
             if(SUCCEEDED(hr))
             {
                 data->render = ptr;
-                data->thread = StartThread(MMDevApiProc, device);
-                if(!data->thread)
+                if(!StartThread(&data->thread, MMDevApiProc, device))
                 {
                     if(data->render)
                         IAudioRenderClient_Release(data->render);
@@ -878,6 +880,9 @@ static ALCenum MMDevApiOpenPlayback(ALCdevice *device, const ALCchar *deviceName
             CloseHandle(data->MsgEvent);
         data->MsgEvent = NULL;
 
+        free(data->devid);
+        data->devid = NULL;
+
         free(data);
         device->ExtraData = NULL;
 
@@ -963,8 +968,6 @@ static const BackendFuncs MMDevApiFuncs = {
     NULL,
     NULL,
     NULL,
-    ALCdevice_LockDefault,
-    ALCdevice_UnlockDefault,
     MMDevApiGetLatency
 };
 
