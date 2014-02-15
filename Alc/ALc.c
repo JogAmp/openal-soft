@@ -153,6 +153,8 @@ static const ALCfunction alcFunctions[] = {
     DECL(alcDevicePauseSOFT),
     DECL(alcDeviceResumeSOFT),
 
+    DECL(alcGetInteger64vSOFT),
+
     DECL(alEnable),
     DECL(alDisable),
     DECL(alIsEnabled),
@@ -744,8 +746,8 @@ static const ALCchar alcNoDeviceExtList[] =
 static const ALCchar alcExtensionList[] =
     "ALC_ENUMERATE_ALL_EXT ALC_ENUMERATION_EXT ALC_EXT_CAPTURE "
     "ALC_EXT_DEDICATED ALC_EXT_disconnect ALC_EXT_EFX "
-    "ALC_EXT_thread_local_context ALC_SOFTX_HRTF ALC_SOFT_loopback "
-    "ALC_SOFTX_midi_interface ALC_SOFTX_pause_device";
+    "ALC_EXT_thread_local_context ALC_SOFTX_device_clock ALC_SOFTX_HRTF "
+    "ALC_SOFT_loopback ALC_SOFTX_midi_interface ALC_SOFTX_pause_device";
 static const ALCint alcMajorVersion = 1;
 static const ALCint alcMinorVersion = 1;
 
@@ -1577,6 +1579,18 @@ static void alcSetError(ALCdevice *device, ALCenum errorCode)
 }
 
 
+/* UpdateClockBase
+ *
+ * Updates the device's base clock time with however many samples have been
+ * done. This is used so frequency changes on the device don't cause the time
+ * to jump forward or back.
+ */
+static inline void UpdateClockBase(ALCdevice *device)
+{
+    device->ClockBase += device->SamplesDone * DEVICE_CLOCK_RES / device->Frequency;
+    device->SamplesDone = 0;
+}
+
 /* UpdateDeviceParams
  *
  * Updates device parameters according to the attribute list (caller is
@@ -1683,6 +1697,8 @@ static ALCenum UpdateDeviceParams(ALCdevice *device, const ALCint *attrList)
             V0(device->Backend,stop)();
         device->Flags &= ~DEVICE_RUNNING;
 
+        if(freq != device->Frequency)
+            UpdateClockBase(device);
         device->Frequency = freq;
         device->FmtChans = schans;
         device->FmtType = stype;
@@ -1745,10 +1761,12 @@ static ALCenum UpdateDeviceParams(ALCdevice *device, const ALCint *attrList)
 
         device->UpdateSize = (ALuint64)device->UpdateSize * freq /
                              device->Frequency;
-        /* SSE does best with the update size being a multiple of 4 */
-        if((CPUCapFlags&CPU_CAP_SSE))
+        /* SSE and Neon do best with the update size being a multiple of 4 */
+        if((CPUCapFlags&(CPU_CAP_SSE|CPU_CAP_NEON)) != 0)
             device->UpdateSize = (device->UpdateSize+3)&~3;
 
+        if(freq != device->Frequency)
+            UpdateClockBase(device);
         device->Frequency = freq;
         device->NumMonoSources = numMono;
         device->NumStereoSources = numStereo;
@@ -1757,6 +1775,8 @@ static ALCenum UpdateDeviceParams(ALCdevice *device, const ALCint *attrList)
 
     if((device->Flags&DEVICE_RUNNING))
         return ALC_NO_ERROR;
+
+    UpdateClockBase(device);
 
     oldFreq  = device->Frequency;
     oldChans = device->FmtChans;
@@ -1861,6 +1881,8 @@ static ALCenum UpdateDeviceParams(ALCdevice *device, const ALCint *attrList)
     {
         if((CPUCapFlags&CPU_CAP_SSE))
             WARN("SSE performs best with multiple of 4 update sizes (%u)\n", device->UpdateSize);
+        if((CPUCapFlags&CPU_CAP_NEON))
+            WARN("NEON performs best with multiple of 4 update sizes (%u)\n", device->UpdateSize);
     }
 
     SetMixerFPUMode(&oldMode);
@@ -2415,19 +2437,14 @@ ALC_API const ALCchar* ALC_APIENTRY alcGetString(ALCdevice *Device, ALCenum para
 }
 
 
-/* alcGetIntegerv
- *
- * Returns information about the device and the version of OpenAL
- */
-ALC_API ALCvoid ALC_APIENTRY alcGetIntegerv(ALCdevice *device,ALCenum param,ALsizei size,ALCint *data)
+static ALCsizei GetIntegerv(ALCdevice *device, ALCenum param, ALCsizei size, ALCint *values)
 {
-    device = VerifyDevice(device);
+    ALCsizei i;
 
-    if(size == 0 || data == NULL)
+    if(size <= 0 || values == NULL)
     {
         alcSetError(device, ALC_INVALID_VALUE);
-        if(device) ALCdevice_DecRef(device);
-        return;
+        return 0;
     }
 
     if(!device)
@@ -2435,11 +2452,11 @@ ALC_API ALCvoid ALC_APIENTRY alcGetIntegerv(ALCdevice *device,ALCenum param,ALsi
         switch(param)
         {
             case ALC_MAJOR_VERSION:
-                *data = alcMajorVersion;
-                break;
+                values[0] = alcMajorVersion;
+                return 1;
             case ALC_MINOR_VERSION:
-                *data = alcMinorVersion;
-                break;
+                values[0] = alcMinorVersion;
+                return 1;
 
             case ALC_ATTRIBUTES_SIZE:
             case ALC_ALL_ATTRIBUTES:
@@ -2452,153 +2469,269 @@ ALC_API ALCvoid ALC_APIENTRY alcGetIntegerv(ALCdevice *device,ALCenum param,ALsi
             case ALC_FORMAT_CHANNELS_SOFT:
             case ALC_FORMAT_TYPE_SOFT:
                 alcSetError(NULL, ALC_INVALID_DEVICE);
-                break;
+                return 0;
 
             default:
                 alcSetError(NULL, ALC_INVALID_ENUM);
-                break;
+                return 0;
         }
+        return 0;
     }
-    else if(device->Type == Capture)
+
+    if(device->Type == Capture)
     {
         switch(param)
         {
             case ALC_CAPTURE_SAMPLES:
                 ALCdevice_Lock(device);
-                *data = V0(device->Backend,availableSamples)();
+                values[0] = V0(device->Backend,availableSamples)();
                 ALCdevice_Unlock(device);
-                break;
+                return 1;
 
             case ALC_CONNECTED:
-                *data = device->Connected;
-                break;
+                values[0] = device->Connected;
+                return 1;
 
             default:
                 alcSetError(device, ALC_INVALID_ENUM);
-                break;
+                return 0;
         }
+        return 0;
+    }
+
+    /* render device */
+    switch(param)
+    {
+        case ALC_MAJOR_VERSION:
+            values[0] = alcMajorVersion;
+            return 1;
+
+        case ALC_MINOR_VERSION:
+            values[0] = alcMinorVersion;
+            return 1;
+
+        case ALC_EFX_MAJOR_VERSION:
+            values[0] = alcEFXMajorVersion;
+            return 1;
+
+        case ALC_EFX_MINOR_VERSION:
+            values[0] = alcEFXMinorVersion;
+            return 1;
+
+        case ALC_ATTRIBUTES_SIZE:
+            values[0] = 15;
+            return 1;
+
+        case ALC_ALL_ATTRIBUTES:
+            if(size < 15)
+            {
+                alcSetError(device, ALC_INVALID_VALUE);
+                return 0;
+            }
+
+            i = 0;
+            values[i++] = ALC_FREQUENCY;
+            values[i++] = device->Frequency;
+
+            if(device->Type != Loopback)
+            {
+                values[i++] = ALC_REFRESH;
+                values[i++] = device->Frequency / device->UpdateSize;
+
+                values[i++] = ALC_SYNC;
+                values[i++] = ALC_FALSE;
+            }
+            else
+            {
+                values[i++] = ALC_FORMAT_CHANNELS_SOFT;
+                values[i++] = device->FmtChans;
+
+                values[i++] = ALC_FORMAT_TYPE_SOFT;
+                values[i++] = device->FmtType;
+            }
+
+            values[i++] = ALC_MONO_SOURCES;
+            values[i++] = device->NumMonoSources;
+
+            values[i++] = ALC_STEREO_SOURCES;
+            values[i++] = device->NumStereoSources;
+
+            values[i++] = ALC_MAX_AUXILIARY_SENDS;
+            values[i++] = device->NumAuxSends;
+
+            values[i++] = ALC_HRTF_SOFT;
+            values[i++] = (device->Hrtf ? ALC_TRUE : ALC_FALSE);
+
+            values[i++] = 0;
+            return i;
+
+        case ALC_FREQUENCY:
+            values[0] = device->Frequency;
+            return 1;
+
+        case ALC_REFRESH:
+            if(device->Type == Loopback)
+            {
+                alcSetError(device, ALC_INVALID_DEVICE);
+                return 0;
+            }
+            values[0] = device->Frequency / device->UpdateSize;
+            return 1;
+
+        case ALC_SYNC:
+            if(device->Type == Loopback)
+            {
+                alcSetError(device, ALC_INVALID_DEVICE);
+                return 0;
+            }
+            values[0] = ALC_FALSE;
+            return 1;
+
+        case ALC_FORMAT_CHANNELS_SOFT:
+            if(device->Type != Loopback)
+            {
+                alcSetError(device, ALC_INVALID_DEVICE);
+                return 0;
+            }
+            values[0] = device->FmtChans;
+            return 1;
+
+        case ALC_FORMAT_TYPE_SOFT:
+            if(device->Type != Loopback)
+            {
+                alcSetError(device, ALC_INVALID_DEVICE);
+                return 0;
+            }
+            values[0] = device->FmtType;
+            return 1;
+
+        case ALC_MONO_SOURCES:
+            values[0] = device->NumMonoSources;
+            return 1;
+
+        case ALC_STEREO_SOURCES:
+            values[0] = device->NumStereoSources;
+            return 1;
+
+        case ALC_MAX_AUXILIARY_SENDS:
+            values[0] = device->NumAuxSends;
+            return 1;
+
+        case ALC_CONNECTED:
+            values[0] = device->Connected;
+            return 1;
+
+        case ALC_HRTF_SOFT:
+            values[0] = (device->Hrtf ? ALC_TRUE : ALC_FALSE);
+            return 1;
+
+        default:
+            alcSetError(device, ALC_INVALID_ENUM);
+            return 0;
+    }
+    return 0;
+}
+
+/* alcGetIntegerv
+ *
+ * Returns information about the device and the version of OpenAL
+ */
+ALC_API void ALC_APIENTRY alcGetIntegerv(ALCdevice *device, ALCenum param, ALCsizei size, ALCint *values)
+{
+    device = VerifyDevice(device);
+    if(size <= 0 || values == NULL)
+        alcSetError(device, ALC_INVALID_VALUE);
+    else
+        GetIntegerv(device, param, size, values);
+    if(device) ALCdevice_DecRef(device);
+}
+
+ALC_API void ALC_APIENTRY alcGetInteger64vSOFT(ALCdevice *device, ALCenum pname, ALCsizei size, ALCint64SOFT *values)
+{
+    ALCint *ivals;
+    ALsizei i;
+
+    device = VerifyDevice(device);
+    if(size <= 0 || values == NULL)
+        alcSetError(device, ALC_INVALID_VALUE);
+    else if(!device || device->Type == Capture)
+    {
+        ivals = malloc(size * sizeof(ALCint));
+        size = GetIntegerv(device, pname, size, ivals);
+        for(i = 0;i < size;i++)
+            values[i] = ivals[i];
+        free(ivals);
     }
     else /* render device */
     {
-        switch(param)
+        switch(pname)
         {
-            case ALC_MAJOR_VERSION:
-                *data = alcMajorVersion;
-                break;
-
-            case ALC_MINOR_VERSION:
-                *data = alcMinorVersion;
-                break;
-
-            case ALC_EFX_MAJOR_VERSION:
-                *data = alcEFXMajorVersion;
-                break;
-
-            case ALC_EFX_MINOR_VERSION:
-                *data = alcEFXMinorVersion;
-                break;
-
             case ALC_ATTRIBUTES_SIZE:
-                *data = 15;
+                *values = 17;
                 break;
 
             case ALC_ALL_ATTRIBUTES:
-                if(size < 15)
+                if(size < 17)
                     alcSetError(device, ALC_INVALID_VALUE);
                 else
                 {
                     int i = 0;
 
-                    data[i++] = ALC_FREQUENCY;
-                    data[i++] = device->Frequency;
+                    V0(device->Backend,lock)();
+                    values[i++] = ALC_FREQUENCY;
+                    values[i++] = device->Frequency;
 
                     if(device->Type != Loopback)
                     {
-                        data[i++] = ALC_REFRESH;
-                        data[i++] = device->Frequency / device->UpdateSize;
+                        values[i++] = ALC_REFRESH;
+                        values[i++] = device->Frequency / device->UpdateSize;
 
-                        data[i++] = ALC_SYNC;
-                        data[i++] = ALC_FALSE;
+                        values[i++] = ALC_SYNC;
+                        values[i++] = ALC_FALSE;
                     }
                     else
                     {
-                        data[i++] = ALC_FORMAT_CHANNELS_SOFT;
-                        data[i++] = device->FmtChans;
+                        values[i++] = ALC_FORMAT_CHANNELS_SOFT;
+                        values[i++] = device->FmtChans;
 
-                        data[i++] = ALC_FORMAT_TYPE_SOFT;
-                        data[i++] = device->FmtType;
+                        values[i++] = ALC_FORMAT_TYPE_SOFT;
+                        values[i++] = device->FmtType;
                     }
 
-                    data[i++] = ALC_MONO_SOURCES;
-                    data[i++] = device->NumMonoSources;
+                    values[i++] = ALC_MONO_SOURCES;
+                    values[i++] = device->NumMonoSources;
 
-                    data[i++] = ALC_STEREO_SOURCES;
-                    data[i++] = device->NumStereoSources;
+                    values[i++] = ALC_STEREO_SOURCES;
+                    values[i++] = device->NumStereoSources;
 
-                    data[i++] = ALC_MAX_AUXILIARY_SENDS;
-                    data[i++] = device->NumAuxSends;
+                    values[i++] = ALC_MAX_AUXILIARY_SENDS;
+                    values[i++] = device->NumAuxSends;
 
-                    data[i++] = ALC_HRTF_SOFT;
-                    data[i++] = (device->Hrtf ? ALC_TRUE : ALC_FALSE);
+                    values[i++] = ALC_HRTF_SOFT;
+                    values[i++] = (device->Hrtf ? ALC_TRUE : ALC_FALSE);
 
-                    data[i++] = 0;
+                    values[i++] = ALC_DEVICE_CLOCK_SOFT;
+                    values[i++] = device->ClockBase +
+                                  (device->SamplesDone * DEVICE_CLOCK_RES / device->Frequency);
+
+                    values[i++] = 0;
+                    V0(device->Backend,unlock)();
                 }
                 break;
 
-            case ALC_FREQUENCY:
-                *data = device->Frequency;
-                break;
-
-            case ALC_REFRESH:
-                if(device->Type == Loopback)
-                    alcSetError(device, ALC_INVALID_DEVICE);
-                else
-                    *data = device->Frequency / device->UpdateSize;
-                break;
-
-            case ALC_SYNC:
-                if(device->Type == Loopback)
-                    alcSetError(device, ALC_INVALID_DEVICE);
-                else
-                    *data = ALC_FALSE;
-                break;
-
-            case ALC_FORMAT_CHANNELS_SOFT:
-                if(device->Type != Loopback)
-                    alcSetError(device, ALC_INVALID_DEVICE);
-                else
-                    *data = device->FmtChans;
-                break;
-
-            case ALC_FORMAT_TYPE_SOFT:
-                if(device->Type != Loopback)
-                    alcSetError(device, ALC_INVALID_DEVICE);
-                else
-                    *data = device->FmtType;
-                break;
-
-            case ALC_MONO_SOURCES:
-                *data = device->NumMonoSources;
-                break;
-
-            case ALC_STEREO_SOURCES:
-                *data = device->NumStereoSources;
-                break;
-
-            case ALC_MAX_AUXILIARY_SENDS:
-                *data = device->NumAuxSends;
-                break;
-
-            case ALC_CONNECTED:
-                *data = device->Connected;
-                break;
-
-            case ALC_HRTF_SOFT:
-                *data = (device->Hrtf ? ALC_TRUE : ALC_FALSE);
+            case ALC_DEVICE_CLOCK_SOFT:
+                V0(device->Backend,lock)();
+                *values = device->ClockBase +
+                          (device->SamplesDone * DEVICE_CLOCK_RES / device->Frequency);
+                V0(device->Backend,unlock)();
                 break;
 
             default:
-                alcSetError(device, ALC_INVALID_ENUM);
+                ivals = malloc(size * sizeof(ALCint));
+                size = GetIntegerv(device, pname, size, ivals);
+                for(i = 0;i < size;i++)
+                    values[i] = ivals[i];
+                free(ivals);
                 break;
         }
     }
@@ -2932,6 +3065,9 @@ ALC_API ALCdevice* ALC_APIENTRY alcOpenDevice(const ALCchar *deviceName)
     device->DeviceName = NULL;
 
     device->ContextList = NULL;
+
+    device->ClockBase = 0;
+    device->SamplesDone = 0;
 
     device->MaxNoOfSources = 256;
     device->AuxiliaryEffectSlotMax = 4;
@@ -3399,6 +3535,9 @@ ALC_API ALCdevice* ALC_APIENTRY alcLoopbackOpenDeviceSOFT(const ALCchar *deviceN
     device->DeviceName = NULL;
 
     device->ContextList = NULL;
+
+    device->ClockBase = 0;
+    device->SamplesDone = 0;
 
     device->MaxNoOfSources = 256;
     device->AuxiliaryEffectSlotMax = 4;

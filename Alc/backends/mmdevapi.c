@@ -600,6 +600,13 @@ static DWORD CALLBACK MMDevApiMsgProc(void *ptr)
 
     CoUninitialize();
 
+    /* HACK: Force Windows to create a message queue for this thread before
+     * returning success, otherwise PostThreadMessage may fail if it gets
+     * called before GetMessage.
+     */
+    PeekMessage(&msg, NULL, WM_USER, WM_USER, PM_NOREMOVE);
+
+    TRACE("Message thread initialization complete\n");
     req->result = S_OK;
     SetEvent(req->FinishedEvt);
 
@@ -834,7 +841,10 @@ static ALCenum MMDevApiOpenPlayback(ALCdevice *device, const ALCchar *deviceName
     data->NotifyEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
     data->MsgEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
     if(data->NotifyEvent == NULL || data->MsgEvent == NULL)
+    {
+        ERR("Failed to create message events: %lu\n", GetLastError());
         hr = E_FAIL;
+    }
 
     if(SUCCEEDED(hr))
     {
@@ -859,6 +869,8 @@ static ALCenum MMDevApiOpenPlayback(ALCdevice *device, const ALCchar *deviceName
                     break;
                 }
             }
+            if(FAILED(hr))
+                WARN("Failed to find device name matching \"%s\"\n", deviceName);
         }
     }
 
@@ -869,6 +881,8 @@ static ALCenum MMDevApiOpenPlayback(ALCdevice *device, const ALCchar *deviceName
         hr = E_FAIL;
         if(PostThreadMessage(ThreadID, WM_USER_OpenDevice, (WPARAM)&req, (LPARAM)device))
             hr = WaitForResponse(&req);
+        else
+            ERR("Failed to post thread message: %lu\n", GetLastError());
     }
 
     if(FAILED(hr))

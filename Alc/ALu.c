@@ -118,6 +118,10 @@ static DryMixerFunc SelectDirectMixer(void)
     if((CPUCapFlags&CPU_CAP_SSE))
         return MixDirect_SSE;
 #endif
+#ifdef HAVE_NEON
+    if((CPUCapFlags&CPU_CAP_NEON))
+        return MixDirect_Neon;
+#endif
 
     return MixDirect_C;
 }
@@ -127,6 +131,10 @@ static WetMixerFunc SelectSendMixer(void)
 #ifdef HAVE_SSE
     if((CPUCapFlags&CPU_CAP_SSE))
         return MixSend_SSE;
+#endif
+#ifdef HAVE_NEON
+    if((CPUCapFlags&CPU_CAP_NEON))
+        return MixSend_Neon;
 #endif
 
     return MixSend_C;
@@ -1118,25 +1126,20 @@ ALvoid aluMixData(ALCdevice *device, ALvoid *buffer, ALsizei size)
             for(i = 0;i < SamplesToDo;i++)
                 (*slot)->WetBuffer[0][i] = 0.0f;
         }
+
+        /* Increment the clock time. Every second's worth of samples is
+         * converted and added to clock base so that large sample counts don't
+         * overflow during conversion. This also guarantees an exact, stable
+         * conversion. */
+        device->SamplesDone += SamplesToDo;
+        device->ClockBase += (device->SamplesDone/device->Frequency) * DEVICE_CLOCK_RES;
+        device->SamplesDone %= device->Frequency;
         ALCdevice_Unlock(device);
 
         /* Click-removal. Could do better; this only really handles immediate
          * changes between updates where a predictive sample could be
          * generated. Delays caused by effects and HRTF aren't caught. */
-        if(device->FmtChans == DevFmtMono)
-        {
-            ALfloat offset = device->ClickRemoval[FrontCenter];
-            if(offset < (1.0f/32768.0f))
-                offset = 0.0f;
-            else for(i = 0;i < SamplesToDo;i++)
-            {
-                device->DryBuffer[FrontCenter][i] += offset;
-                offset -= offset * (1.0f/256.0f);
-            }
-            device->ClickRemoval[FrontCenter] = offset + device->PendingClicks[FrontCenter];
-            device->PendingClicks[FrontCenter] = 0.0f;
-        }
-        else if(device->FmtChans == DevFmtStereo)
+        if(device->FmtChans == DevFmtStereo)
         {
             /* Assumes the first two channels are FrontLeft and FrontRight */
             for(c = 0;c < 2;c++)

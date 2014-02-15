@@ -59,7 +59,7 @@ static ALvoid ALautowahState_Destruct(ALautowahState *UNUSED(state))
 
 static ALboolean ALautowahState_deviceUpdate(ALautowahState *state, ALCdevice *device)
 {
-    state->Frequency = device->Frequency;
+    state->Frequency = (ALfloat)device->Frequency;
     return AL_TRUE;
 }
 
@@ -100,7 +100,7 @@ static ALvoid ALautowahState_process(ALautowahState *state, ALuint SamplesToDo, 
 
             /* Similar to compressor, we get the current amplitude of the
              * incoming signal, and attack or release to reach it. */
-            amplitude = fabs(smp);
+            amplitude = fabsf(smp);
             if(amplitude > gain)
                 gain = minf(gain+state->AttackRate, amplitude);
             else if(amplitude < gain)
@@ -108,7 +108,7 @@ static ALvoid ALautowahState_process(ALautowahState *state, ALuint SamplesToDo, 
             gain = maxf(gain, GAIN_SILENCE_THRESHOLD);
 
             /* FIXME: What range does the filter cover? */
-            cutoff = lerp(1000.0f, (ALfloat)LOWPASSFREQREF, minf(gain/state->PeakGain, 1.0f));
+            cutoff = lerp(20.0f, 20000.0f, minf(gain/state->PeakGain, 1.0f));
 
             /* The code below is like calling ALfilterState_setParams with
              * ALfilterType_LowPass. However, instead of passing a bandwidth,
