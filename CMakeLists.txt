@@ -410,6 +410,9 @@ IF(ALSOFT_DLOPEN)
     ENDIF()
 ENDIF()
 
+# Check if we have Android headers
+CHECK_INCLUDE_FILE(android/api-level.h HAVE_ANDROID_H)
+
 # Check if we have Windows headers
 CHECK_INCLUDE_FILE(windows.h HAVE_WINDOWS_H -D_WIN32_WINNT=0x0501)
 IF(NOT HAVE_WINDOWS_H)
@@ -436,15 +439,20 @@ IF(NOT HAVE_WINDOWS_H)
     CHECK_INCLUDE_FILES("pthread.h;pthread_np.h" HAVE_PTHREAD_NP_H)
 
     CHECK_C_COMPILER_FLAG(-pthread HAVE_PTHREAD)
-    IF(HAVE_PTHREAD)
-        ADD_DEFINITIONS(-pthread)
-        SET(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -pthread")
-        SET(EXTRA_LIBS ${EXTRA_LIBS} -pthread)
-    ENDIF()
+    IF(NOT HAVE_ANDROID_H)
+        IF(HAVE_PTHREAD)
+            ADD_DEFINITIONS(-pthread)
+            SET(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -pthread")
+            SET(EXTRA_LIBS ${EXTRA_LIBS} -pthread)
+        ENDIF()
 
-    CHECK_LIBRARY_EXISTS(pthread pthread_create "" HAVE_LIBPTHREAD)
-    IF(HAVE_LIBPTHREAD)
-        SET(EXTRA_LIBS pthread ${EXTRA_LIBS})
+        CHECK_LIBRARY_EXISTS(pthread pthread_create "" HAVE_LIBPTHREAD)
+        IF(HAVE_LIBPTHREAD)
+            SET(EXTRA_LIBS pthread ${EXTRA_LIBS})
+        ENDIF()
+    ELSE()
+        # FIXME: Android has pthread in it's bionic libc!
+        CHECK_LIBRARY_EXISTS(c pthread_create "" HAVE_LIBPTHREAD)
     ENDIF()
 
     CHECK_SYMBOL_EXISTS(pthread_setschedparam pthread.h HAVE_PTHREAD_SETSCHEDPARAM)
