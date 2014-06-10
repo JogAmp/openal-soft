@@ -715,7 +715,7 @@ AL_API ALvoid AL_APIENTRY alDeferUpdatesSOFT(void)
     if(!context->DeferUpdates)
     {
         ALboolean UpdateSources;
-        ALsource **src, **src_end;
+        ALactivesource **src, **src_end;
         ALeffectslot **slot, **slot_end;
         FPUCtl oldMode;
 
@@ -731,21 +731,25 @@ AL_API ALvoid AL_APIENTRY alDeferUpdatesSOFT(void)
         src_end = src + context->ActiveSourceCount;
         while(src != src_end)
         {
-            if((*src)->state != AL_PLAYING)
+            ALsource *source = (*src)->Source;
+
+            if(source->state != AL_PLAYING && source->state != AL_PAUSED)
             {
-                context->ActiveSourceCount--;
-                *src = *(--src_end);
+                ALactivesource *temp = *(--src_end);
+                *src_end = *src;
+                *src = temp;
+                --(context->ActiveSourceCount);
                 continue;
             }
 
-            if(ExchangeInt(&(*src)->NeedsUpdate, AL_FALSE) || UpdateSources)
-                ALsource_Update(*src, context);
+            if(ExchangeInt(&source->NeedsUpdate, AL_FALSE) || UpdateSources)
+                (*src)->Update(*src, context);
 
             src++;
         }
 
-        slot = context->ActiveEffectSlots;
-        slot_end = slot + context->ActiveEffectSlotCount;
+        slot = VECTOR_ITER_BEGIN(context->ActiveAuxSlots);
+        slot_end = VECTOR_ITER_END(context->ActiveAuxSlots);
         while(slot != slot_end)
         {
             if(ExchangeInt(&(*slot)->NeedsUpdate, AL_FALSE))
@@ -780,7 +784,11 @@ AL_API ALvoid AL_APIENTRY alProcessUpdatesSOFT(void)
 
             if((Source->state == AL_PLAYING || Source->state == AL_PAUSED) &&
                Source->Offset >= 0.0)
+            {
+                ReadLock(&Source->queue_lock);
                 ApplyOffset(Source);
+                ReadUnlock(&Source->queue_lock);
+            }
 
             new_state = ExchangeInt(&Source->new_state, AL_NONE);
             if(new_state)

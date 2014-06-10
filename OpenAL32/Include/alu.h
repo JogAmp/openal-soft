@@ -1,8 +1,6 @@
 #ifndef _ALU_H_
 #define _ALU_H_
 
-#include "alMain.h"
-
 #include <limits.h>
 #include <math.h>
 #ifdef HAVE_FLOAT_H
@@ -11,6 +9,13 @@
 #ifdef HAVE_IEEEFP_H
 #include <ieeefp.h>
 #endif
+
+#include "alMain.h"
+#include "alBuffer.h"
+#include "alFilter.h"
+
+#include "hrtf.h"
+#include "align.h"
 
 
 #define F_PI    (3.14159265358979323846f)
@@ -25,29 +30,112 @@
 #define RAD2DEG(x)  ((ALfloat)(x) * (180.0f/F_PI))
 
 
+#define SRC_HISTORY_BITS   (6)
+#define SRC_HISTORY_LENGTH (1<<SRC_HISTORY_BITS)
+#define SRC_HISTORY_MASK   (SRC_HISTORY_LENGTH-1)
+
+#define MAX_PITCH  (10)
+
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-struct ALsource;
-struct ALbuffer;
-struct DirectParams;
-struct SendParams;
-
-typedef void (*ResamplerFunc)(const ALfloat *src, ALuint frac, ALuint increment,
-                              ALfloat *restrict dst, ALuint dstlen);
-
-typedef ALvoid (*DryMixerFunc)(const struct DirectParams *params,
-                               const ALfloat *restrict data, ALuint srcchan,
-                               ALuint OutPos, ALuint SamplesToDo,
-                               ALuint BufferSize);
-typedef ALvoid (*WetMixerFunc)(const struct SendParams *params,
-                               const ALfloat *restrict data,
-                               ALuint OutPos, ALuint SamplesToDo,
-                               ALuint BufferSize);
+enum ActiveFilters {
+    AF_None = 0,
+    AF_LowPass = 1,
+    AF_HighPass = 2,
+    AF_BandPass = AF_LowPass | AF_HighPass
+};
 
 
-#define GAIN_SILENCE_THRESHOLD  (0.00001f)
+typedef struct HrtfState {
+    alignas(16) ALfloat History[SRC_HISTORY_LENGTH];
+    alignas(16) ALfloat Values[HRIR_LENGTH][2];
+} HrtfState;
+
+typedef struct HrtfParams {
+    alignas(16) ALfloat Coeffs[HRIR_LENGTH][2];
+    alignas(16) ALfloat CoeffStep[HRIR_LENGTH][2];
+    ALuint Delay[2];
+    ALint DelayStep[2];
+} HrtfParams;
+
+
+typedef struct MixGains {
+    ALfloat Current[MaxChannels];
+    ALfloat Step[MaxChannels];
+    ALfloat Target[MaxChannels];
+} MixGains;
+
+typedef struct MixGainMono {
+    ALfloat Current;
+    ALfloat Step;
+    ALfloat Target;
+} MixGainMono;
+
+
+typedef struct DirectParams {
+    ALfloat (*OutBuffer)[BUFFERSIZE];
+
+    /* If not 'moving', gain/coefficients are set directly without fading. */
+    ALboolean Moving;
+    /* Stepping counter for gain/coefficient fading. */
+    ALuint Counter;
+
+    struct {
+        enum ActiveFilters ActiveType;
+        ALfilterState LowPass;
+        ALfilterState HighPass;
+    } Filters[MAX_INPUT_CHANNELS];
+
+    union {
+        struct {
+            HrtfParams Params[MAX_INPUT_CHANNELS];
+            HrtfState State[MAX_INPUT_CHANNELS];
+            ALuint IrSize;
+            ALfloat Gain;
+            ALfloat Dir[3];
+        } Hrtf;
+
+        MixGains Gains[MAX_INPUT_CHANNELS];
+    } Mix;
+} DirectParams;
+
+typedef struct SendParams {
+    ALfloat (*OutBuffer)[BUFFERSIZE];
+
+    ALboolean Moving;
+    ALuint Counter;
+
+    struct {
+        enum ActiveFilters ActiveType;
+        ALfilterState LowPass;
+        ALfilterState HighPass;
+    } Filters[MAX_INPUT_CHANNELS];
+
+    /* Gain control, which applies to all input channels to a single (mono)
+     * output buffer. */
+    MixGainMono Gain;
+} SendParams;
+
+
+typedef const ALfloat* (*ResamplerFunc)(const ALfloat *src, ALuint frac, ALuint increment,
+                                        ALfloat *restrict dst, ALuint dstlen);
+
+typedef void (*DryMixerFunc)(ALfloat (*restrict OutBuffer)[BUFFERSIZE], const ALfloat *data,
+                             MixGains *Gains, ALuint Counter, ALuint OutPos,
+                             ALuint BufferSize);
+typedef void (*HrtfMixerFunc)(ALfloat (*restrict OutBuffer)[BUFFERSIZE], const ALfloat *data,
+                              ALuint Counter, ALuint Offset, ALuint OutPos,
+                              const ALuint IrSize, const HrtfParams *hrtfparams,
+                              HrtfState *hrtfstate, ALuint BufferSize);
+typedef void (*WetMixerFunc)(ALfloat (*restrict OutBuffer)[BUFFERSIZE], const ALfloat *data,
+                             MixGainMono *Gain, ALuint Counter, ALuint OutPos,
+                             ALuint BufferSize);
+
+
+#define GAIN_SILENCE_THRESHOLD  (0.00001f) /* -100dB */
 
 #define SPEEDOFSOUNDMETRESPERSEC  (343.3f)
 #define AIRABSORBGAINHF           (0.99426f) /* -0.05dB */
@@ -137,10 +225,10 @@ inline void SetGains(const ALCdevice *device, ALfloat ingain, ALfloat gains[MaxC
 }
 
 
-ALvoid CalcSourceParams(struct ALsource *ALSource, const ALCcontext *ALContext);
-ALvoid CalcNonAttnSourceParams(struct ALsource *ALSource, const ALCcontext *ALContext);
+ALvoid CalcSourceParams(struct ALactivesource *src, const ALCcontext *ALContext);
+ALvoid CalcNonAttnSourceParams(struct ALactivesource *src, const ALCcontext *ALContext);
 
-ALvoid MixSource(struct ALsource *Source, ALCdevice *Device, ALuint SamplesToDo);
+ALvoid MixSource(struct ALactivesource *src, ALCdevice *Device, ALuint SamplesToDo);
 
 ALvoid aluMixData(ALCdevice *device, ALvoid *buffer, ALsizei size);
 /* Caller must lock the device. */

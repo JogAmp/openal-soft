@@ -18,6 +18,14 @@
  * Or go to http://www.gnu.org/copyleft/lgpl.html
  */
 
+#ifdef _WIN32
+#ifdef __MINGW32__
+#define _WIN32_IE 0x501
+#else
+#define _WIN32_IE 0x400
+#endif
+#endif
+
 #include "config.h"
 
 #include <stdlib.h>
@@ -71,23 +79,19 @@ DEFINE_DEVPROPKEY(DEVPKEY_Device_FriendlyName, 0xa45c254e, 0xdf1c, 0x4efd, 0x80,
 #include <ieeefp.h>
 #endif
 
+#ifdef _WIN32_IE
+#include <shlobj.h>
+#endif
+
 #include "alMain.h"
+#include "alu.h"
 #include "atomic.h"
 #include "uintmap.h"
+#include "vector.h"
+#include "alstring.h"
 #include "compat.h"
+#include "threads.h"
 
-
-extern inline RefCount IncrementRef(volatile RefCount *ptr);
-extern inline RefCount DecrementRef(volatile RefCount *ptr);
-extern inline int ExchangeInt(volatile int *ptr, int newval);
-extern inline void *ExchangePtr(XchgPtr *ptr, void *newval);
-extern inline ALboolean CompExchangeInt(volatile int *ptr, int oldval, int newval);
-extern inline ALboolean CompExchangePtr(XchgPtr *ptr, void *oldval, void *newval);
-
-extern inline void LockUIntMapRead(UIntMap *map);
-extern inline void UnlockUIntMapRead(UIntMap *map);
-extern inline void LockUIntMapWrite(UIntMap *map);
-extern inline void UnlockUIntMapWrite(UIntMap *map);
 
 extern inline ALuint NextPowerOf2(ALuint value);
 extern inline ALint fastf2i(ALfloat f);
@@ -135,7 +139,11 @@ void FillCPUCaps(ALuint capfilter)
             {
                 caps |= CPU_CAP_SSE;
                 if((cpuinf[0].regs[3]&(1<<26)))
+                {
                     caps |= CPU_CAP_SSE2;
+                    if((cpuinf[0].regs[2]&(1<<19)))
+                        caps |= CPU_CAP_SSE4_1;
+                }
             }
         }
     }
@@ -160,10 +168,13 @@ void FillCPUCaps(ALuint capfilter)
     caps |= CPU_CAP_NEON;
 #endif
 
-    TRACE("Got caps:%s%s%s%s\n", ((caps&CPU_CAP_SSE)?((capfilter&CPU_CAP_SSE)?" SSE":" (SSE)"):""),
-                                 ((caps&CPU_CAP_SSE2)?((capfilter&CPU_CAP_SSE2)?" SSE2":" (SSE2)"):""),
-                                 ((caps&CPU_CAP_NEON)?((capfilter&CPU_CAP_NEON)?" Neon":" (Neon)"):""),
-                                 ((!caps)?" -none-":""));
+    TRACE("Extensions:%s%s%s%s%s\n",
+        ((capfilter&CPU_CAP_SSE)    ? ((caps&CPU_CAP_SSE)    ? " +SSE"    : " -SSE")    : ""),
+        ((capfilter&CPU_CAP_SSE2)   ? ((caps&CPU_CAP_SSE2)   ? " +SSE2"   : " -SSE2")   : ""),
+        ((capfilter&CPU_CAP_SSE4_1) ? ((caps&CPU_CAP_SSE4_1) ? " +SSE4.1" : " -SSE4.1") : ""),
+        ((capfilter&CPU_CAP_NEON)   ? ((caps&CPU_CAP_NEON)   ? " +Neon"   : " -Neon")   : ""),
+        ((!capfilter) ? " -none-" : "")
+    );
     CPUCapFlags = caps & capfilter;
 }
 
@@ -294,46 +305,36 @@ void RestoreFPUMode(const FPUCtl *ctl)
 
 
 #ifdef _WIN32
-extern inline int alsched_yield(void);
 
-void althread_once(althread_once_t *once, void (*callback)(void))
+static WCHAR *FromUTF8(const char *str)
 {
-    LONG ret;
-    while((ret=InterlockedExchange(once, 1)) == 1)
-        alsched_yield();
-    if(ret == 0)
-        callback();
-    InterlockedExchange(once, 2);
-}
+    WCHAR *out = NULL;
+    int len;
 
-
-int althread_key_create(althread_key_t *key, void (*callback)(void*))
-{
-    *key = TlsAlloc();
-    if(callback)
-        InsertUIntMapEntry(&TlsDestructor, *key, callback);
-    return 0;
-}
-
-int althread_key_delete(althread_key_t key)
-{
-    InsertUIntMapEntry(&TlsDestructor, key, NULL);
-    TlsFree(key);
-    return 0;
-}
-
-void *althread_getspecific(althread_key_t key)
-{ return TlsGetValue(key); }
-
-int althread_setspecific(althread_key_t key, void *val)
-{
-    TlsSetValue(key, val);
-    return 0;
+    if((len=MultiByteToWideChar(CP_UTF8, 0, str, -1, NULL, 0)) > 0)
+    {
+        out = calloc(sizeof(WCHAR), len);
+        MultiByteToWideChar(CP_UTF8, 0, str, -1, out, len);
+    }
+    return out;
 }
 
 
 void *LoadLib(const char *name)
-{ return LoadLibraryA(name); }
+{
+    HANDLE hdl = NULL;
+    WCHAR *wname;
+
+    wname = FromUTF8(name);
+    if(!wname)
+        ERR("Failed to convert UTF-8 filename: \"%s\"\n", name);
+    else
+    {
+        hdl = LoadLibraryW(wname);
+        free(wname);
+    }
+    return hdl;
+}
 void CloseLib(void *handle)
 { FreeLibrary((HANDLE)handle); }
 void *GetSymbol(void *handle, const char *name)
@@ -362,97 +363,27 @@ WCHAR *strdupW(const WCHAR *str)
     return ret;
 }
 
+FILE *al_fopen(const char *fname, const char *mode)
+{
+    WCHAR *wname=NULL, *wmode=NULL;
+    FILE *file = NULL;
+
+    wname = FromUTF8(fname);
+    wmode = FromUTF8(mode);
+    if(!wname)
+        ERR("Failed to convert UTF-8 filename: \"%s\"\n", fname);
+    else if(!wmode)
+        ERR("Failed to convert UTF-8 mode: \"%s\"\n", mode);
+    else
+        file = _wfopen(wname, wmode);
+
+    free(wname);
+    free(wmode);
+
+    return file;
+}
+
 #else
-
-#include <pthread.h>
-#ifdef HAVE_PTHREAD_NP_H
-#include <pthread_np.h>
-#endif
-#include <sched.h>
-#include <time.h>
-#include <sys/time.h>
-
-void InitializeCriticalSection(CRITICAL_SECTION *cs)
-{
-    pthread_mutexattr_t attrib;
-    int ret;
-
-    ret = pthread_mutexattr_init(&attrib);
-    assert(ret == 0);
-
-    ret = pthread_mutexattr_settype(&attrib, PTHREAD_MUTEX_RECURSIVE);
-#ifdef HAVE_PTHREAD_NP_H
-    if(ret != 0)
-        ret = pthread_mutexattr_setkind_np(&attrib, PTHREAD_MUTEX_RECURSIVE);
-#endif
-    assert(ret == 0);
-    ret = pthread_mutex_init(cs, &attrib);
-    assert(ret == 0);
-
-    pthread_mutexattr_destroy(&attrib);
-}
-void DeleteCriticalSection(CRITICAL_SECTION *cs)
-{
-    int ret;
-    ret = pthread_mutex_destroy(cs);
-    assert(ret == 0);
-}
-void EnterCriticalSection(CRITICAL_SECTION *cs)
-{
-    int ret;
-    ret = pthread_mutex_lock(cs);
-    assert(ret == 0);
-}
-void LeaveCriticalSection(CRITICAL_SECTION *cs)
-{
-    int ret;
-    ret = pthread_mutex_unlock(cs);
-    assert(ret == 0);
-}
-
-/* NOTE: This wrapper isn't quite accurate as it returns an ALuint, as opposed
- * to the expected DWORD. Both are defined as unsigned 32-bit types, however.
- * Additionally, Win32 is supposed to measure the time since Windows started,
- * as opposed to the actual time. */
-ALuint timeGetTime(void)
-{
-#if _POSIX_TIMERS > 0
-    struct timespec ts;
-    int ret = -1;
-
-#if defined(_POSIX_MONOTONIC_CLOCK) && (_POSIX_MONOTONIC_CLOCK >= 0)
-#if _POSIX_MONOTONIC_CLOCK == 0
-    static int hasmono = 0;
-    if(hasmono > 0 || (hasmono == 0 &&
-                       (hasmono=sysconf(_SC_MONOTONIC_CLOCK)) > 0))
-#endif
-        ret = clock_gettime(CLOCK_MONOTONIC, &ts);
-#endif
-    if(ret != 0)
-        ret = clock_gettime(CLOCK_REALTIME, &ts);
-    assert(ret == 0);
-
-    return ts.tv_nsec/1000000 + ts.tv_sec*1000;
-#else
-    struct timeval tv;
-    int ret;
-
-    ret = gettimeofday(&tv, NULL);
-    assert(ret == 0);
-
-    return tv.tv_usec/1000 + tv.tv_sec*1000;
-#endif
-}
-
-void Sleep(ALuint t)
-{
-    struct timespec tv, rem;
-    tv.tv_nsec = (t*1000000)%1000000000;
-    tv.tv_sec = t/1000;
-
-    while(nanosleep(&tv, &rem) == -1 && errno == EINTR)
-        tv = rem;
-}
 
 #ifdef HAVE_DLFCN_H
 
@@ -500,6 +431,135 @@ void al_print(const char *type, const char *func, const char *fmt, ...)
     fflush(LogFile);
 }
 
+#ifdef _WIN32
+static inline int is_slash(int c)
+{ return (c == '\\' || c == '/'); }
+
+FILE *OpenDataFile(const char *fname, const char *subdir)
+{
+    static const int ids[2] = { CSIDL_APPDATA, CSIDL_COMMON_APPDATA };
+    WCHAR *wname=NULL, *wsubdir=NULL;
+    int i;
+
+    /* If the path is absolute, open it directly. */
+    if(fname[0] != '\0' && fname[1] == ':' && is_slash(fname[2]))
+    {
+        FILE *f;
+        if((f=al_fopen(fname, "rb")) != NULL)
+        {
+            TRACE("Opened %s\n", fname);
+            return f;
+        }
+        WARN("Could not open %s\n", fname);
+        return NULL;
+    }
+
+    wname = FromUTF8(fname);
+    wsubdir = FromUTF8(subdir);
+    if(!wname)
+        ERR("Failed to convert UTF-8 filename: \"%s\"\n", fname);
+    else if(!wsubdir)
+        ERR("Failed to convert UTF-8 subdir: \"%s\"\n", subdir);
+    else for(i = 0;i < 2;i++)
+    {
+        WCHAR buffer[PATH_MAX];
+        size_t len;
+        FILE *f;
+
+        if(SHGetSpecialFolderPathW(NULL, buffer, ids[i], FALSE) == FALSE)
+            continue;
+
+        len = lstrlenW(buffer);
+        if(len > 0 && is_slash(buffer[len-1]))
+            buffer[--len] = '\0';
+        _snwprintf(buffer+len, PATH_MAX-len, L"/%ls/%ls", wsubdir, wname);
+        len = lstrlenW(buffer);
+        while(len > 0)
+        {
+            --len;
+            if(buffer[len] == '/')
+                buffer[len] = '\\';
+        }
+
+        if((f=_wfopen(buffer, L"rb")) != NULL)
+        {
+            TRACE("Opened %ls\n", buffer);
+            return f;
+        }
+        WARN("Could not open %ls\n", buffer);
+    }
+    free(wname);
+    free(wsubdir);
+
+    return NULL;
+}
+#else
+FILE *OpenDataFile(const char *fname, const char *subdir)
+{
+    char buffer[PATH_MAX] = "";
+    const char *str, *next;
+    FILE *f;
+
+    if(fname[0] == '/')
+    {
+        if((f=al_fopen(fname, "rb")) != NULL)
+        {
+            TRACE("Opened %s\n", fname);
+            return f;
+        }
+        WARN("Could not open %s\n", fname);
+        return NULL;
+    }
+
+    if((str=getenv("XDG_DATA_HOME")) != NULL && str[0] != '\0')
+        snprintf(buffer, sizeof(buffer), "%s/%s/%s", str, subdir, fname);
+    else if((str=getenv("HOME")) != NULL && str[0] != '\0')
+        snprintf(buffer, sizeof(buffer), "%s/.local/share/%s/%s", str, subdir, fname);
+    if(buffer[0])
+    {
+        if((f=al_fopen(buffer, "rb")) != NULL)
+        {
+            TRACE("Opened %s\n", buffer);
+            return f;
+        }
+        WARN("Could not open %s\n", buffer);
+    }
+
+    if((str=getenv("XDG_DATA_DIRS")) == NULL || str[0] == '\0')
+        str = "/usr/local/share/:/usr/share/";
+
+    next = str;
+    while((str=next) != NULL && str[0] != '\0')
+    {
+        size_t len;
+        next = strchr(str, ':');
+
+        if(!next)
+            len = strlen(str);
+        else
+        {
+            len = next - str;
+            next++;
+        }
+
+        if(len > sizeof(buffer)-1)
+            len = sizeof(buffer)-1;
+        strncpy(buffer, str, len);
+        buffer[len] = '\0';
+        snprintf(buffer+len, sizeof(buffer)-len, "/%s/%s", subdir, fname);
+
+        if((f=al_fopen(buffer, "rb")) != NULL)
+        {
+            TRACE("Opened %s\n", buffer);
+            return f;
+        }
+        WARN("Could not open %s\n", buffer);
+    }
+
+    return NULL;
+}
+#endif
+
 
 void SetRTPriority(void)
 {
@@ -526,183 +586,172 @@ void SetRTPriority(void)
 }
 
 
-static void Lock(volatile ALenum *l)
+ALboolean vector_reserve(void *ptr, size_t base_size, size_t obj_count, size_t obj_size, ALboolean exact)
 {
-    while(ExchangeInt(l, AL_TRUE) == AL_TRUE)
-        alsched_yield();
-}
-
-static void Unlock(volatile ALenum *l)
-{
-    ExchangeInt(l, AL_FALSE);
-}
-
-void RWLockInit(RWLock *lock)
-{
-    lock->read_count = 0;
-    lock->write_count = 0;
-    lock->read_lock = AL_FALSE;
-    lock->read_entry_lock = AL_FALSE;
-    lock->write_lock = AL_FALSE;
-}
-
-void ReadLock(RWLock *lock)
-{
-    Lock(&lock->read_entry_lock);
-    Lock(&lock->read_lock);
-    if(IncrementRef(&lock->read_count) == 1)
-        Lock(&lock->write_lock);
-    Unlock(&lock->read_lock);
-    Unlock(&lock->read_entry_lock);
-}
-
-void ReadUnlock(RWLock *lock)
-{
-    if(DecrementRef(&lock->read_count) == 0)
-        Unlock(&lock->write_lock);
-}
-
-void WriteLock(RWLock *lock)
-{
-    if(IncrementRef(&lock->write_count) == 1)
-        Lock(&lock->read_lock);
-    Lock(&lock->write_lock);
-}
-
-void WriteUnlock(RWLock *lock)
-{
-    Unlock(&lock->write_lock);
-    if(DecrementRef(&lock->write_count) == 0)
-        Unlock(&lock->read_lock);
-}
-
-
-void InitUIntMap(UIntMap *map, ALsizei limit)
-{
-    map->array = NULL;
-    map->size = 0;
-    map->maxsize = 0;
-    map->limit = limit;
-    RWLockInit(&map->lock);
-}
-
-void ResetUIntMap(UIntMap *map)
-{
-    WriteLock(&map->lock);
-    free(map->array);
-    map->array = NULL;
-    map->size = 0;
-    map->maxsize = 0;
-    WriteUnlock(&map->lock);
-}
-
-ALenum InsertUIntMapEntry(UIntMap *map, ALuint key, ALvoid *value)
-{
-    ALsizei pos = 0;
-
-    WriteLock(&map->lock);
-    if(map->size > 0)
+    vector_ *vecptr = ptr;
+    if((size_t)(*vecptr ? (*vecptr)->Capacity : 0) < obj_count)
     {
-        ALsizei low = 0;
-        ALsizei high = map->size - 1;
-        while(low < high)
-        {
-            ALsizei mid = low + (high-low)/2;
-            if(map->array[mid].key < key)
-                low = mid + 1;
-            else
-                high = mid;
-        }
-        if(map->array[low].key < key)
-            low++;
-        pos = low;
+        ALsizei old_size = (*vecptr ? (*vecptr)->Size : 0);
+        void *temp;
+
+        /* Limit vector sizes to the greatest power-of-two value that an
+         * ALsizei can hold. */
+        if(obj_count > (INT_MAX>>1)+1)
+            return AL_FALSE;
+
+        /* Use the next power-of-2 size if we don't need to allocate the exact
+         * amount. This is preferred when regularly increasing the vector since
+         * it means fewer reallocations. Though it means it also wastes some
+         * memory. */
+        if(exact == AL_FALSE)
+            obj_count = NextPowerOf2((ALuint)obj_count);
+
+        /* Need to be explicit with the caller type's base size, because it
+         * could have extra padding before the start of the array (that is,
+         * sizeof(*vector_) may not equal base_size). */
+        temp = realloc(*vecptr, base_size + obj_size*obj_count);
+        if(temp == NULL) return AL_FALSE;
+
+        *vecptr = temp;
+        (*vecptr)->Capacity = (ALsizei)obj_count;
+        (*vecptr)->Size = old_size;
     }
-
-    if(pos == map->size || map->array[pos].key != key)
-    {
-        if(map->size == map->limit)
-        {
-            WriteUnlock(&map->lock);
-            return AL_OUT_OF_MEMORY;
-        }
-
-        if(map->size == map->maxsize)
-        {
-            ALvoid *temp = NULL;
-            ALsizei newsize;
-
-            newsize = (map->maxsize ? (map->maxsize<<1) : 4);
-            if(newsize >= map->maxsize)
-                temp = realloc(map->array, newsize*sizeof(map->array[0]));
-            if(!temp)
-            {
-                WriteUnlock(&map->lock);
-                return AL_OUT_OF_MEMORY;
-            }
-            map->array = temp;
-            map->maxsize = newsize;
-        }
-
-        if(pos < map->size)
-            memmove(&map->array[pos+1], &map->array[pos],
-                    (map->size-pos)*sizeof(map->array[0]));
-        map->size++;
-    }
-    map->array[pos].key = key;
-    map->array[pos].value = value;
-    WriteUnlock(&map->lock);
-
-    return AL_NO_ERROR;
+    return AL_TRUE;
 }
 
-ALvoid *RemoveUIntMapKey(UIntMap *map, ALuint key)
+ALboolean vector_resize(void *ptr, size_t base_size, size_t obj_count, size_t obj_size)
 {
-    ALvoid *ptr = NULL;
-    WriteLock(&map->lock);
-    if(map->size > 0)
+    vector_ *vecptr = ptr;
+    if(*vecptr || obj_count > 0)
     {
-        ALsizei low = 0;
-        ALsizei high = map->size - 1;
-        while(low < high)
-        {
-            ALsizei mid = low + (high-low)/2;
-            if(map->array[mid].key < key)
-                low = mid + 1;
-            else
-                high = mid;
-        }
-        if(map->array[low].key == key)
-        {
-            ptr = map->array[low].value;
-            if(low < map->size-1)
-                memmove(&map->array[low], &map->array[low+1],
-                        (map->size-1-low)*sizeof(map->array[0]));
-            map->size--;
-        }
+        if(!vector_reserve(vecptr, base_size, obj_count, obj_size, AL_TRUE))
+            return AL_FALSE;
+        (*vecptr)->Size = (ALsizei)obj_count;
     }
-    WriteUnlock(&map->lock);
-    return ptr;
+    return AL_TRUE;
 }
 
-ALvoid *LookupUIntMapKey(UIntMap *map, ALuint key)
+ALboolean vector_insert(void *ptr, size_t base_size, size_t obj_size, void *ins_pos, const void *datstart, const void *datend)
 {
-    ALvoid *ptr = NULL;
-    ReadLock(&map->lock);
-    if(map->size > 0)
+    vector_ *vecptr = ptr;
+    if(datstart != datend)
     {
-        ALsizei low = 0;
-        ALsizei high = map->size - 1;
-        while(low < high)
+        ptrdiff_t ins_elem = ((char*)ins_pos - ((char*)(*vecptr) + base_size)) / obj_size;
+        ptrdiff_t numins = ((const char*)datend - (const char*)datstart) / obj_size;
+
+        assert(numins > 0);
+        if(INT_MAX-VECTOR_SIZE(*vecptr) <= numins ||
+           !vector_reserve(vecptr, base_size, VECTOR_SIZE(*vecptr)+numins, obj_size, AL_TRUE))
+            return AL_FALSE;
+
+        /* NOTE: ins_pos may have been invalidated if *vecptr moved. Use ins_elem instead. */
+        if(ins_elem < (*vecptr)->Size)
         {
-            ALsizei mid = low + (high-low)/2;
-            if(map->array[mid].key < key)
-                low = mid + 1;
-            else
-                high = mid;
+            memmove((char*)(*vecptr) + base_size + ((ins_elem+numins)*obj_size),
+                    (char*)(*vecptr) + base_size + ((ins_elem       )*obj_size),
+                    ((*vecptr)->Size-ins_elem)*obj_size);
         }
-        if(map->array[low].key == key)
-            ptr = map->array[low].value;
+        memcpy((char*)(*vecptr) + base_size + (ins_elem*obj_size),
+               datstart, numins*obj_size);
+        (*vecptr)->Size += (ALsizei)numins;
     }
-    ReadUnlock(&map->lock);
-    return ptr;
+    return AL_TRUE;
 }
+
+
+extern inline ALsizei al_string_length(const_al_string str);
+extern inline ALboolean al_string_empty(const_al_string str);
+extern inline const al_string_char_type *al_string_get_cstr(const_al_string str);
+
+void al_string_clear(al_string *str)
+{
+    /* Reserve one more character than the total size of the string. This is to
+     * ensure we have space to add a null terminator in the string data so it
+     * can be used as a C-style string. */
+    VECTOR_RESERVE(*str, 1);
+    VECTOR_RESIZE(*str, 0);
+    *VECTOR_ITER_END(*str) = 0;
+}
+
+static inline int al_string_compare(const al_string_char_type *str1, ALsizei str1len,
+                                    const al_string_char_type *str2, ALsizei str2len)
+{
+    ALsizei complen = mini(str1len, str2len);
+    int ret = memcmp(str1, str2, complen);
+    if(ret == 0)
+    {
+        if(str1len > str2len) return  1;
+        if(str1len < str2len) return -1;
+    }
+    return ret;
+}
+int al_string_cmp(const_al_string str1, const_al_string str2)
+{
+    return al_string_compare(&VECTOR_FRONT(str1), al_string_length(str1),
+                             &VECTOR_FRONT(str2), al_string_length(str2));
+}
+int al_string_cmp_cstr(const_al_string str1, const al_string_char_type *str2)
+{
+    return al_string_compare(&VECTOR_FRONT(str1), al_string_length(str1),
+                             str2, (ALsizei)strlen(str2));
+}
+
+void al_string_copy(al_string *str, const_al_string from)
+{
+    ALsizei len = VECTOR_SIZE(from);
+    VECTOR_RESERVE(*str, len+1);
+    VECTOR_RESIZE(*str, 0);
+    VECTOR_INSERT(*str, VECTOR_ITER_END(*str), VECTOR_ITER_BEGIN(from), VECTOR_ITER_BEGIN(from)+len);
+    *VECTOR_ITER_END(*str) = 0;
+}
+
+void al_string_copy_cstr(al_string *str, const al_string_char_type *from)
+{
+    size_t len = strlen(from);
+    VECTOR_RESERVE(*str, len+1);
+    VECTOR_RESIZE(*str, 0);
+    VECTOR_INSERT(*str, VECTOR_ITER_END(*str), from, from+len);
+    *VECTOR_ITER_END(*str) = 0;
+}
+
+void al_string_append_char(al_string *str, const al_string_char_type c)
+{
+    VECTOR_RESERVE(*str, al_string_length(*str)+2);
+    VECTOR_PUSH_BACK(*str, c);
+    *VECTOR_ITER_END(*str) = 0;
+}
+
+void al_string_append_cstr(al_string *str, const al_string_char_type *from)
+{
+    size_t len = strlen(from);
+    if(len != 0)
+    {
+        VECTOR_RESERVE(*str, al_string_length(*str)+len+1);
+        VECTOR_INSERT(*str, VECTOR_ITER_END(*str), from, from+len);
+        *VECTOR_ITER_END(*str) = 0;
+    }
+}
+
+void al_string_append_range(al_string *str, const al_string_char_type *from, const al_string_char_type *to)
+{
+    if(to != from)
+    {
+        VECTOR_RESERVE(*str, al_string_length(*str)+(to-from)+1);
+        VECTOR_INSERT(*str, VECTOR_ITER_END(*str), from, to);
+        *VECTOR_ITER_END(*str) = 0;
+    }
+}
+
+#ifdef _WIN32
+void al_string_copy_wcstr(al_string *str, const wchar_t *from)
+{
+    int len;
+    if((len=WideCharToMultiByte(CP_UTF8, 0, from, -1, NULL, 0, NULL, NULL)) > 0)
+    {
+        VECTOR_RESERVE(*str, len);
+        VECTOR_RESIZE(*str, len-1);
+        WideCharToMultiByte(CP_UTF8, 0, from, -1, &VECTOR_FRONT(*str), len, NULL, NULL);
+        *VECTOR_ITER_END(*str) = 0;
+    }
+}
+#endif

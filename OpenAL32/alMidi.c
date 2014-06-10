@@ -19,7 +19,9 @@
 
 MidiSynth *SynthCreate(ALCdevice *device)
 {
-    MidiSynth *synth = FSynth_create(device);
+    MidiSynth *synth = NULL;
+    if(!synth) synth = SSynth_create(device);
+    if(!synth) synth = FSynth_create(device);
     if(!synth) synth = DSynth_create(device);
     return synth;
 }
@@ -133,7 +135,7 @@ AL_API void AL_APIENTRY alMidiPlaySOFT(void)
 
     synth = context->Device->Synth;
     WriteLock(&synth->Lock);
-    V(synth,setState)(AL_PLAYING);
+    MidiSynth_setState(synth, AL_PLAYING);
     WriteUnlock(&synth->Lock);
 
     ALCcontext_DecRef(context);
@@ -149,7 +151,7 @@ AL_API void AL_APIENTRY alMidiPauseSOFT(void)
 
     synth = context->Device->Synth;
     WriteLock(&synth->Lock);
-    V(synth,setState)(AL_PAUSED);
+    MidiSynth_setState(synth, AL_PAUSED);
     WriteUnlock(&synth->Lock);
 
     ALCcontext_DecRef(context);
@@ -168,7 +170,7 @@ AL_API void AL_APIENTRY alMidiStopSOFT(void)
     synth = device->Synth;
 
     WriteLock(&synth->Lock);
-    V(synth,setState)(AL_STOPPED);
+    MidiSynth_setState(synth, AL_STOPPED);
 
     ALCdevice_Lock(device);
     V0(synth,stop)();
@@ -191,7 +193,7 @@ AL_API void AL_APIENTRY alMidiResetSOFT(void)
     synth = device->Synth;
 
     WriteLock(&synth->Lock);
-    V(synth,setState)(AL_INITIAL);
+    MidiSynth_setState(synth, AL_INITIAL);
 
     ALCdevice_Lock(device);
     V0(synth,reset)();

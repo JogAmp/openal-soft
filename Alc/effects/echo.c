@@ -97,7 +97,7 @@ static ALvoid ALechoState_update(ALechoState *state, ALCdevice *Device, const AL
 
     ALfilterState_setParams(&state->Filter, ALfilterType_HighShelf,
                             1.0f - Slot->EffectProps.Echo.Damping,
-                            (ALfloat)LOWPASSFREQREF/frequency, 0.0f);
+                            LOWPASSFREQREF/frequency, 0.0f);
 
     gain = Slot->Gain;
     dirGain = fabsf(lrpan);
@@ -161,10 +161,7 @@ static ALvoid ALechoState_process(ALechoState *state, ALuint SamplesToDo, const 
     state->Offset = offset;
 }
 
-static void ALechoState_Delete(ALechoState *state)
-{
-    free(state);
-}
+DECLARE_DEFAULT_ALLOCATORS(ALechoState)
 
 DEFINE_ALEFFECTSTATE_VTABLE(ALechoState);
 
@@ -177,7 +174,7 @@ ALeffectState *ALechoStateFactory_create(ALechoStateFactory *UNUSED(factory))
 {
     ALechoState *state;
 
-    state = malloc(sizeof(*state));
+    state = ALechoState_New(sizeof(*state));
     if(!state) return NULL;
     SET_VTABLE2(ALechoState, ALeffectState, state);
 

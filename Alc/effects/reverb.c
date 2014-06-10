@@ -1096,7 +1096,7 @@ static ALvoid ALreverbState_update(ALreverbState *State, ALCdevice *Device, cons
     }
     else
     {
-        hfscale = (ALfloat)LOWPASSFREQREF / frequency;
+        hfscale = LOWPASSFREQREF / frequency;
         ALfilterState_setParams(&State->LpFilter, ALfilterType_HighShelf,
                                 Slot->EffectProps.Reverb.GainHF,
                                 hfscale, 0.0f);
@@ -1170,10 +1170,7 @@ static ALvoid ALreverbState_Destruct(ALreverbState *State)
     State->SampleBuffer = NULL;
 }
 
-static void ALreverbState_Delete(ALreverbState *state)
-{
-    free(state);
-}
+DECLARE_DEFAULT_ALLOCATORS(ALreverbState)
 
 DEFINE_ALEFFECTSTATE_VTABLE(ALreverbState);
 
@@ -1187,7 +1184,7 @@ static ALeffectState *ALreverbStateFactory_create(ALreverbStateFactory* UNUSED(f
     ALreverbState *state;
     ALuint index;
 
-    state = malloc(sizeof(ALreverbState));
+    state = ALreverbState_New(sizeof(*state));
     if(!state) return NULL;
     SET_VTABLE2(ALreverbState, ALeffectState, state);
 

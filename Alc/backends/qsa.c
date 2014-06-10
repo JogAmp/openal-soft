@@ -34,8 +34,7 @@
 #include "threads.h"
 
 
-typedef struct
-{
+typedef struct {
     snd_pcm_t* pcmHandle;
     int audio_fd;
 
@@ -46,27 +45,24 @@ typedef struct
     ALsizei size;
 
     volatile int killNow;
-    althread_t thread;
+    althrd_t thread;
 } qsa_data;
 
-typedef struct
-{
+typedef struct {
     ALCchar* name;
     int card;
     int dev;
 } DevMap;
 
-static const ALCchar qsaDevice[]="QSA Default";
+static const ALCchar qsaDevice[] = "QSA Default";
 static DevMap* allDevNameMap;
 static ALuint numDevNames;
 static DevMap* allCaptureDevNameMap;
 static ALuint numCaptureDevNames;
 
-static const struct
-{
+static const struct {
     int32_t format;
-} formatlist[]=
-{
+} formatlist[] = {
     {SND_PCM_SFMT_FLOAT_LE},
     {SND_PCM_SFMT_S32_LE},
     {SND_PCM_SFMT_U32_LE},
@@ -77,11 +73,9 @@ static const struct
     {0},
 };
 
-static const struct
-{
+static const struct {
     int32_t rate;
-} ratelist[]=
-{
+} ratelist[] = {
     {192000},
     {176400},
     {96000},
@@ -98,11 +92,9 @@ static const struct
     {0},
 };
 
-static const struct
-{
+static const struct {
     int32_t channels;
-} channellist[]=
-{
+} channellist[] = {
     {8},
     {7},
     {6},
@@ -112,7 +104,7 @@ static const struct
     {0},
 };
 
-static DevMap* deviceList(int type, ALuint* count)
+static DevMap *deviceList(int type, ALuint *count)
 {
     snd_ctl_t* handle;
     snd_pcm_info_t pcminfo;
@@ -178,7 +170,7 @@ static DevMap* deviceList(int type, ALuint* count)
 }
 
 
-FORCE_ALIGN static ALuint qsa_proc_playback(ALvoid* ptr)
+FORCE_ALIGN static int qsa_proc_playback(void* ptr)
 {
     ALCdevice* device=(ALCdevice*)ptr;
     qsa_data* data=(qsa_data*)device->ExtraData;
@@ -191,7 +183,7 @@ FORCE_ALIGN static ALuint qsa_proc_playback(ALvoid* ptr)
     struct timeval timeout;
 
     SetRTPriority();
-    SetThreadName(MIXER_THREAD_NAME);
+    althrd_setname(althrd_current(), MIXER_THREAD_NAME);
 
     /* Increase default 10 priority to 11 to avoid jerky sound */
     SchedGet(0, 0, &param);
@@ -343,8 +335,8 @@ static ALCenum qsa_open_playback(ALCdevice* device, const ALCchar* deviceName)
         return ALC_INVALID_DEVICE;
     }
 
-    device->DeviceName=strdup(deviceName);
-    device->ExtraData=data;
+    al_string_copy_cstr(&device->DeviceName, deviceName);
+    device->ExtraData = data;
 
     return ALC_NO_ERROR;
 }
@@ -616,7 +608,8 @@ static ALCboolean qsa_start_playback(ALCdevice* device)
 {
     qsa_data *data = (qsa_data*)device->ExtraData;
 
-    if(!StartThread(&data->thread, qsa_proc_playback, device))
+    data->killNow = 0;
+    if(althrd_create(&data->thread, qsa_proc_playback, device) != althrd_success)
         return ALC_FALSE;
 
     return ALC_TRUE;
@@ -624,15 +617,14 @@ static ALCboolean qsa_start_playback(ALCdevice* device)
 
 static void qsa_stop_playback(ALCdevice* device)
 {
-    qsa_data* data=(qsa_data*)device->ExtraData;
+    qsa_data *data = (qsa_data*)device->ExtraData;
+    int res;
 
-    if (data->thread)
-    {
-        data->killNow=1;
-        StopThread(data->thread);
-        data->thread=NULL;
-    }
-    data->killNow=0;
+    if(data->killNow)
+        return;
+
+    data->killNow = 1;
+    althrd_join(data->thread, &res);
 }
 
 /***********/
@@ -711,8 +703,8 @@ static ALCenum qsa_open_capture(ALCdevice* device, const ALCchar* deviceName)
         return ALC_INVALID_DEVICE;
     }
 
-    device->DeviceName=strdup(deviceName);
-    device->ExtraData=data;
+    al_string_copy_cstr(&device->DeviceName, deviceName);
+    device->ExtraData = data;
 
     switch (device->FmtType)
     {

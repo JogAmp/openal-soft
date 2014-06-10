@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <alloca.h>
 
 #include "alMain.h"
 #include "alu.h"
@@ -180,7 +181,7 @@ static ALCenum ca_open_playback(ALCdevice *device, const ALCchar *deviceName)
         return ALC_INVALID_VALUE;
     }
 
-    device->DeviceName = strdup(deviceName);
+    al_string_copy_cstr(&device->DeviceName, deviceName);
     device->ExtraData = data;
     return ALC_NO_ERROR;
 }
@@ -576,6 +577,8 @@ static ALCenum ca_open_capture(ALCdevice *device, const ALCchar *deviceName)
     data->ring = CreateRingBuffer(data->frameSize, (device->UpdateSize * data->sampleRateRatio) * device->NumUpdates);
     if(data->ring == NULL)
         goto error;
+
+    al_string_copy_cstr(&device->DeviceName, deviceName);
 
     return ALC_NO_ERROR;
 

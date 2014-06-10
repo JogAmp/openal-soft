@@ -22,6 +22,7 @@ enum UserFmtType {
     UserFmtMulaw,
     UserFmtAlaw,
     UserFmtIMA4,
+    UserFmtMSADPCM,
 };
 enum UserFmtChannels {
     UserFmtMono   = AL_MONO_SOFT,
@@ -33,8 +34,8 @@ enum UserFmtChannels {
     UserFmtX71    = AL_7POINT1_SOFT, /* (WFX order) */
 };
 
-ALuint BytesFromUserFmt(enum UserFmtType type);
-ALuint ChannelsFromUserFmt(enum UserFmtChannels chans);
+ALuint BytesFromUserFmt(enum UserFmtType type) DECL_CONST;
+ALuint ChannelsFromUserFmt(enum UserFmtChannels chans) DECL_CONST;
 inline ALuint FrameSizeFromUserFmt(enum UserFmtChannels chans, enum UserFmtType type)
 {
     return ChannelsFromUserFmt(chans) * BytesFromUserFmt(type);
@@ -58,8 +59,8 @@ enum FmtChannels {
 };
 #define MAX_INPUT_CHANNELS  (8)
 
-ALuint BytesFromFmt(enum FmtType type);
-ALuint ChannelsFromFmt(enum FmtChannels chans);
+ALuint BytesFromFmt(enum FmtType type) DECL_CONST;
+ALuint ChannelsFromFmt(enum FmtChannels chans) DECL_CONST;
 inline ALuint FrameSizeFromFmt(enum FmtChannels chans, enum FmtType type)
 {
     return ChannelsFromFmt(chans) * BytesFromFmt(type);
@@ -79,9 +80,13 @@ typedef struct ALbuffer {
     enum UserFmtChannels OriginalChannels;
     enum UserFmtType     OriginalType;
     ALsizei              OriginalSize;
+    ALsizei              OriginalAlign;
 
     ALsizei  LoopStart;
     ALsizei  LoopEnd;
+
+    ALsizei UnpackAlign;
+    ALsizei PackAlign;
 
     /* Number of times buffer was attached to a source (deletion can only occur when 0) */
     RefCount ref;

@@ -50,9 +50,10 @@ static void skip(Reader *stream, ALuint amt)
         size_t got;
 
         got = READ(stream, buf, minu(sizeof(buf), amt));
-        if(got == 0) READERR(stream) = 1;
+        if(got == 0 || got > amt)
+            READERR(stream) = 1;
 
-        amt -= got;
+        amt -= (ALuint)got;
     }
 }
 
@@ -324,61 +325,46 @@ static void RiffHdr_read(RiffHdr *self, Reader *stream)
 }
 
 
-typedef struct GenModList {
-    Generator *gens;
-    ALsizei gens_size;
-    ALsizei gens_max;
+DECL_VECTOR(Generator)
+DECL_VECTOR(Modulator)
 
-    Modulator *mods;
-    ALsizei mods_size;
-    ALsizei mods_max;
+typedef struct GenModList {
+    vector_Generator gens;
+    vector_Modulator mods;
 } GenModList;
 
 static void GenModList_Construct(GenModList *self)
 {
-    self->gens = NULL;
-    self->gens_size = 0;
-    self->gens_max = 0;
-
-    self->mods = NULL;
-    self->mods_size = 0;
-    self->mods_max = 0;
+    VECTOR_INIT(self->gens);
+    VECTOR_INIT(self->mods);
 }
 
 static void GenModList_Destruct(GenModList *self)
 {
-    free(self->gens);
-    self->gens = NULL;
-    self->gens_size = 0;
-    self->gens_max = 0;
-
-    free(self->mods);
-    self->mods = NULL;
-    self->mods_size = 0;
-    self->mods_max = 0;
+    VECTOR_DEINIT(self->mods);
+    VECTOR_DEINIT(self->gens);
 }
 
 static GenModList GenModList_clone(const GenModList *self)
 {
     GenModList ret;
 
-    ret.gens = malloc(self->gens_max * sizeof(ret.gens[0]));
-    memcpy(ret.gens, self->gens, self->gens_size * sizeof(ret.gens[0]));
-    ret.gens_size = self->gens_size;
-    ret.gens_max = self->gens_max;
+    GenModList_Construct(&ret);
 
-    ret.mods = malloc(self->mods_max * sizeof(ret.mods[0]));
-    memcpy(ret.mods, self->mods, self->mods_size * sizeof(ret.mods[0]));
-    ret.mods_size = self->mods_size;
-    ret.mods_max = self->mods_max;
+    VECTOR_INSERT(ret.gens, VECTOR_ITER_END(ret.gens),
+        VECTOR_ITER_BEGIN(self->gens), VECTOR_ITER_END(self->gens)
+    );
+    VECTOR_INSERT(ret.mods, VECTOR_ITER_END(ret.mods),
+        VECTOR_ITER_BEGIN(self->mods), VECTOR_ITER_END(self->mods)
+    );
 
     return ret;
 }
 
 static void GenModList_insertGen(GenModList *self, const Generator *gen, ALboolean ispreset)
 {
-    Generator *i = self->gens;
-    Generator *end = i + self->gens_size;
+    Generator *i = VECTOR_ITER_BEGIN(self->gens);
+    Generator *end = VECTOR_ITER_END(self->gens);
     for(;i != end;i++)
     {
         if(i->mGenerator == gen->mGenerator)
@@ -396,32 +382,16 @@ static void GenModList_insertGen(GenModList *self, const Generator *gen, ALboole
         gen->mGenerator == 58))
         return;
 
-    if(self->gens_size == self->gens_max)
+    if(VECTOR_PUSH_BACK(self->gens, *gen) == AL_FALSE)
     {
-        void *temp = NULL;
-        ALsizei newsize;
-
-        newsize = (self->gens_max ? self->gens_max<<1 : 1);
-        if(newsize > self->gens_max)
-            temp = realloc(self->gens, newsize * sizeof(self->gens[0]));
-        if(!temp)
-        {
-            ERR("Failed to increase generator storage to %d elements (from %d)\n",
-                newsize, self->gens_max);
-            return;
-        }
-
-        self->gens = temp;
-        self->gens_max = newsize;
+        ERR("Failed to insert generator (from %d elements)\n", VECTOR_SIZE(self->gens));
+        return;
     }
-
-    self->gens[self->gens_size] = *gen;
-    self->gens_size++;
 }
 static void GenModList_accumGen(GenModList *self, const Generator *gen)
 {
-    Generator *i = self->gens;
-    Generator *end = i + self->gens_size;
+    Generator *i = VECTOR_ITER_BEGIN(self->gens);
+    Generator *end = VECTOR_ITER_END(self->gens);
     for(;i != end;i++)
     {
         if(i->mGenerator == gen->mGenerator)
@@ -441,35 +411,19 @@ static void GenModList_accumGen(GenModList *self, const Generator *gen)
         }
     }
 
-    if(self->gens_size == self->gens_max)
+    if(VECTOR_PUSH_BACK(self->gens, *gen) == AL_FALSE)
     {
-        void *temp = NULL;
-        ALsizei newsize;
-
-        newsize = (self->gens_max ? self->gens_max<<1 : 1);
-        if(newsize > self->gens_max)
-            temp = realloc(self->gens, newsize * sizeof(self->gens[0]));
-        if(!temp)
-        {
-            ERR("Failed to increase generator storage to %d elements (from %d)\n",
-                newsize, self->gens_max);
-            return;
-        }
-
-        self->gens = temp;
-        self->gens_max = newsize;
+        ERR("Failed to insert generator (from %d elements)\n", VECTOR_SIZE(self->gens));
+        return;
     }
-
-    self->gens[self->gens_size] = *gen;
     if(gen->mGenerator < 60)
-        self->gens[self->gens_size].mAmount += DefaultGenValue[gen->mGenerator];
-    self->gens_size++;
+        VECTOR_BACK(self->gens).mAmount += DefaultGenValue[gen->mGenerator];
 }
 
 static void GenModList_insertMod(GenModList *self, const Modulator *mod)
 {
-    Modulator *i = self->mods;
-    Modulator *end = i + self->mods_size;
+    Modulator *i = VECTOR_ITER_BEGIN(self->mods);
+    Modulator *end = VECTOR_ITER_END(self->mods);
     for(;i != end;i++)
     {
         if(i->mDstOp == mod->mDstOp && i->mSrcOp == mod->mSrcOp &&
@@ -480,32 +434,16 @@ static void GenModList_insertMod(GenModList *self, const Modulator *mod)
         }
     }
 
-    if(self->mods_size == self->mods_max)
+    if(VECTOR_PUSH_BACK(self->mods, *mod) == AL_FALSE)
     {
-        void *temp = NULL;
-        ALsizei newsize;
-
-        newsize = (self->mods_max ? self->mods_max<<1 : 1);
-        if(newsize > self->mods_max)
-            temp = realloc(self->mods, newsize * sizeof(self->mods[0]));
-        if(!temp)
-        {
-            ERR("Failed to increase modulator storage to %d elements (from %d)\n",
-                newsize, self->mods_max);
-            return;
-        }
-
-        self->mods = temp;
-        self->mods_max = newsize;
+        ERR("Failed to insert modulator (from %d elements)\n", VECTOR_SIZE(self->mods));
+        return;
     }
-
-    self->mods[self->mods_size] = *mod;
-    self->mods_size++;
 }
 static void GenModList_accumMod(GenModList *self, const Modulator *mod)
 {
-    Modulator *i = self->mods;
-    Modulator *end = i + self->mods_size;
+    Modulator *i = VECTOR_ITER_BEGIN(self->mods);
+    Modulator *end = VECTOR_ITER_END(self->mods);
     for(;i != end;i++)
     {
         if(i->mDstOp == mod->mDstOp && i->mSrcOp == mod->mSrcOp &&
@@ -516,47 +454,32 @@ static void GenModList_accumMod(GenModList *self, const Modulator *mod)
         }
     }
 
-    if(self->mods_size == self->mods_max)
+    if(VECTOR_PUSH_BACK(self->mods, *mod) == AL_FALSE)
     {
-        void *temp = NULL;
-        ALsizei newsize;
-
-        newsize = (self->mods_max ? self->mods_max<<1 : 1);
-        if(newsize > self->mods_max)
-            temp = realloc(self->mods, newsize * sizeof(self->mods[0]));
-        if(!temp)
-        {
-            ERR("Failed to increase modulator storage to %d elements (from %d)\n",
-                newsize, self->mods_max);
-            return;
-        }
-
-        self->mods = temp;
-        self->mods_max = newsize;
+        ERR("Failed to insert modulator (from %d elements)\n", VECTOR_SIZE(self->mods));
+        return;
     }
 
-    self->mods[self->mods_size] = *mod;
     if(mod->mSrcOp == 0x0502 && mod->mDstOp == 48 && mod->mAmtSrcOp == 0 && mod->mTransOp == 0)
-        self->mods[self->mods_size].mAmount += 960;
+        VECTOR_BACK(self->mods).mAmount += 960;
     else if(mod->mSrcOp == 0x0102 && mod->mDstOp == 8 && mod->mAmtSrcOp == 0 && mod->mTransOp == 0)
-        self->mods[self->mods_size].mAmount += -2400;
+        VECTOR_BACK(self->mods).mAmount += -2400;
     else if(mod->mSrcOp == 0x000D && mod->mDstOp == 6 && mod->mAmtSrcOp == 0 && mod->mTransOp == 0)
-        self->mods[self->mods_size].mAmount += 50;
+        VECTOR_BACK(self->mods).mAmount += 50;
     else if(mod->mSrcOp == 0x0081 && mod->mDstOp == 6 && mod->mAmtSrcOp == 0 && mod->mTransOp == 0)
-        self->mods[self->mods_size].mAmount += 50;
+        VECTOR_BACK(self->mods).mAmount += 50;
     else if(mod->mSrcOp == 0x0582 && mod->mDstOp == 48 && mod->mAmtSrcOp == 0 && mod->mTransOp == 0)
-        self->mods[self->mods_size].mAmount += 960;
+        VECTOR_BACK(self->mods).mAmount += 960;
     else if(mod->mSrcOp == 0x028A && mod->mDstOp == 17 && mod->mAmtSrcOp == 0 && mod->mTransOp == 0)
-        self->mods[self->mods_size].mAmount += 1000;
+        VECTOR_BACK(self->mods).mAmount += 1000;
     else if(mod->mSrcOp == 0x058B && mod->mDstOp == 48 && mod->mAmtSrcOp == 0 && mod->mTransOp == 0)
-        self->mods[self->mods_size].mAmount += 960;
+        VECTOR_BACK(self->mods).mAmount += 960;
     else if(mod->mSrcOp == 0x00DB && mod->mDstOp == 16 && mod->mAmtSrcOp == 0 && mod->mTransOp == 0)
-        self->mods[self->mods_size].mAmount += 200;
+        VECTOR_BACK(self->mods).mAmount += 200;
     else if(mod->mSrcOp == 0x00DD && mod->mDstOp == 15 && mod->mAmtSrcOp == 0 && mod->mTransOp == 0)
-        self->mods[self->mods_size].mAmount += 200;
+        VECTOR_BACK(self->mods).mAmount += 200;
     /*else if(mod->mSrcOp == 0x020E && mod->mDstOp == ?initialpitch? && mod->mAmtSrcOp == 0x0010 && mod->mTransOp == 0)
-        self->mods[self->mods_size].mAmount += 12700;*/
-    self->mods_size++;
+        VECTOR_BACK(self->mods).mAmount += 12700;*/
 }
 
 
@@ -710,21 +633,21 @@ static ALboolean ensureFontSanity(const Soundfont *sfont)
 
 static ALboolean checkZone(const GenModList *zone, const PresetHeader *preset, const InstrumentHeader *inst, const SampleHeader *samp)
 {
-    ALsizei i;
-
-    for(i = 0;i < zone->gens_size;i++)
+    Generator *gen = VECTOR_ITER_BEGIN(zone->gens);
+    Generator *gen_end = VECTOR_ITER_END(zone->gens);
+    for(;gen != gen_end;gen++)
     {
-        if(zone->gens[i].mGenerator == 43 || zone->gens[i].mGenerator == 44)
+        if(gen->mGenerator == 43 || gen->mGenerator == 44)
         {
-            int high = zone->gens[i].mAmount>>8;
-            int low = zone->gens[i].mAmount&0xff;
+            int high = gen->mAmount>>8;
+            int low = gen->mAmount&0xff;
 
             if(!(low >= 0 && high <= 127 && high >= low))
             {
                 TRACE("Preset \"%s\", inst \"%s\", sample \"%s\": invalid %s range %d...%d\n",
                       preset->mName, inst->mName, samp->mName,
-                      (zone->gens[i].mGenerator == 43) ? "key" :
-                      (zone->gens[i].mGenerator == 44) ? "velocity" : "(unknown)",
+                      (gen->mGenerator == 43) ? "key" :
+                      (gen->mGenerator == 44) ? "velocity" : "(unknown)",
                       low, high);
                 return AL_FALSE;
             }
@@ -871,43 +794,43 @@ static void fillZone(ALfontsound *sound, ALCcontext *context, const GenModList *
         0, /* 59 -  */
     };
     const Generator *gen, *gen_end;
+    const Modulator *mod, *mod_end;
 
-    if(zone->mods)
+    mod = VECTOR_ITER_BEGIN(zone->mods);
+    mod_end = VECTOR_ITER_END(zone->mods);
+    for(;mod != mod_end;mod++)
     {
-        ALsizei i;
-        for(i = 0;i < zone->mods_size;i++)
+        ALenum src0in = getModSrcInput(mod->mSrcOp&0xFF);
+        ALenum src0type = getModSrcType(mod->mSrcOp&0x0300);
+        ALenum src0form = getModSrcForm(mod->mSrcOp&0xFC00);
+        ALenum src1in = getModSrcInput(mod->mAmtSrcOp&0xFF);
+        ALenum src1type = getModSrcType(mod->mAmtSrcOp&0x0300);
+        ALenum src1form = getModSrcForm(mod->mAmtSrcOp&0xFC00);
+        ALenum trans = getModTransOp(mod->mTransOp);
+        ALenum dst = (mod->mDstOp < 60) ? Gen2Param[mod->mDstOp] : 0;
+        if(!dst || dst == AL_KEY_RANGE_SOFT || dst == AL_VELOCITY_RANGE_SOFT ||
+           dst == AL_LOOP_MODE_SOFT || dst == AL_EXCLUSIVE_CLASS_SOFT ||
+           dst == AL_BASE_KEY_SOFT)
+            ERR("Unhandled modulator destination: %d\n", mod->mDstOp);
+        else if(src0in != AL_INVALID && src0form != AL_INVALID && src0type != AL_INVALID &&
+                src1in != AL_INVALID && src1form != AL_INVALID && src0type != AL_INVALID &&
+                trans != AL_INVALID)
         {
-            ALenum src0in = getModSrcInput(zone->mods[i].mSrcOp&0xFF);
-            ALenum src0type = getModSrcType(zone->mods[i].mSrcOp&0x0300);
-            ALenum src0form = getModSrcForm(zone->mods[i].mSrcOp&0xFC00);
-            ALenum src1in = getModSrcInput(zone->mods[i].mAmtSrcOp&0xFF);
-            ALenum src1type = getModSrcType(zone->mods[i].mAmtSrcOp&0x0300);
-            ALenum src1form = getModSrcForm(zone->mods[i].mAmtSrcOp&0xFC00);
-            ALenum trans = getModTransOp(zone->mods[i].mTransOp);
-            ALenum dst = (zone->mods[i].mDstOp < 60) ? Gen2Param[zone->mods[i].mDstOp] : 0;
-            if(!dst || dst == AL_KEY_RANGE_SOFT || dst == AL_VELOCITY_RANGE_SOFT ||
-               dst == AL_LOOP_MODE_SOFT || dst == AL_EXCLUSIVE_CLASS_SOFT ||
-               dst == AL_BASE_KEY_SOFT)
-                ERR("Unhandled modulator destination: %d\n", zone->mods[i].mDstOp);
-            else if(src0in != AL_INVALID && src0form != AL_INVALID && src0type != AL_INVALID &&
-                    src1in != AL_INVALID && src1form != AL_INVALID && src0type != AL_INVALID &&
-                    trans != AL_INVALID)
-            {
-                ALfontsound_setModStagei(sound, context, i, AL_SOURCE0_INPUT_SOFT, src0in);
-                ALfontsound_setModStagei(sound, context, i, AL_SOURCE0_TYPE_SOFT, src0type);
-                ALfontsound_setModStagei(sound, context, i, AL_SOURCE0_FORM_SOFT, src0form);
-                ALfontsound_setModStagei(sound, context, i, AL_SOURCE1_INPUT_SOFT, src1in);
-                ALfontsound_setModStagei(sound, context, i, AL_SOURCE1_TYPE_SOFT, src1type);
-                ALfontsound_setModStagei(sound, context, i, AL_SOURCE1_FORM_SOFT, src1form);
-                ALfontsound_setModStagei(sound, context, i, AL_AMOUNT_SOFT, zone->mods[i].mAmount);
-                ALfontsound_setModStagei(sound, context, i, AL_TRANSFORM_OP_SOFT, trans);
-                ALfontsound_setModStagei(sound, context, i, AL_DESTINATION_SOFT, dst);
-            }
+            ALsizei idx = (ALsizei)(mod - VECTOR_ITER_BEGIN(zone->mods));
+            ALfontsound_setModStagei(sound, context, idx, AL_SOURCE0_INPUT_SOFT, src0in);
+            ALfontsound_setModStagei(sound, context, idx, AL_SOURCE0_TYPE_SOFT, src0type);
+            ALfontsound_setModStagei(sound, context, idx, AL_SOURCE0_FORM_SOFT, src0form);
+            ALfontsound_setModStagei(sound, context, idx, AL_SOURCE1_INPUT_SOFT, src1in);
+            ALfontsound_setModStagei(sound, context, idx, AL_SOURCE1_TYPE_SOFT, src1type);
+            ALfontsound_setModStagei(sound, context, idx, AL_SOURCE1_FORM_SOFT, src1form);
+            ALfontsound_setModStagei(sound, context, idx, AL_AMOUNT_SOFT, mod->mAmount);
+            ALfontsound_setModStagei(sound, context, idx, AL_TRANSFORM_OP_SOFT, trans);
+            ALfontsound_setModStagei(sound, context, idx, AL_DESTINATION_SOFT, dst);
         }
     }
 
-    gen = zone->gens;
-    gen_end = gen + zone->gens_size;
+    gen = VECTOR_ITER_BEGIN(zone->gens);
+    gen_end = VECTOR_ITER_END(zone->gens);
     for(;gen != gen_end;gen++)
     {
         ALint value = (ALshort)gen->mAmount;
@@ -1019,8 +942,8 @@ static void processInstrument(ALfontsound ***sounds, ALsizei *sounds_size, ALCco
     temp = realloc(*sounds, (zone_end-zone + *sounds_size)*sizeof((*sounds)[0]));
     if(!temp)
     {
-        ERR("Failed reallocating fontsound storage to %ld elements (from %d)\n",
-            (zone_end-zone + *sounds_size), *sounds_size);
+        ERR("Failed reallocating fontsound storage to %d elements (from %d)\n",
+            (ALsizei)(zone_end-zone) + *sounds_size, *sounds_size);
         return;
     }
     *sounds = temp;
@@ -1049,13 +972,13 @@ static void processInstrument(ALfontsound ***sounds, ALsizei *sounds_size, ALCco
                 }
                 samp = &sfont->shdr[gen->mAmount];
 
-                gen = pzone->gens;
-                gen_end = gen + pzone->gens_size;
+                gen = VECTOR_ITER_BEGIN(pzone->gens);
+                gen_end = VECTOR_ITER_END(pzone->gens);
                 for(;gen != gen_end;gen++)
                     GenModList_accumGen(&lzone, gen);
 
-                mod = pzone->mods;
-                mod_end = mod + pzone->mods_size;
+                mod = VECTOR_ITER_BEGIN(pzone->mods);
+                mod_end = VECTOR_ITER_END(pzone->mods);
                 for(;mod != mod_end;mod++)
                     GenModList_accumMod(&lzone, mod);
 
@@ -1156,6 +1079,8 @@ ALboolean loadSf2(Reader *stream, ALsoundfont *soundfont, ALCcontext *context)
                 TRACE("SF2 ROM ID: %s\n", sfont.irom);
             }
         }
+        else
+            TRACE("Skipping INFO sub-chunk '%c%c%c%c' (%u bytes)\n", FOURCCARGS(info.mCode), info.mSize);
         list.mSize -= info.mSize;
         skip(stream, info.mSize);
     }

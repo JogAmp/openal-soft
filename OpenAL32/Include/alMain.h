@@ -6,6 +6,7 @@
 #include <stdarg.h>
 #include <assert.h>
 #include <math.h>
+#include <limits.h>
 
 #ifdef HAVE_STRINGS_H
 #include <strings.h>
@@ -19,8 +20,22 @@
 #include "AL/alc.h"
 #include "AL/alext.h"
 
+
+#if defined(_WIN64)
+#define SZFMT "%I64u"
+#elif defined(_WIN32)
+#define SZFMT "%u"
+#else
+#define SZFMT "%zu"
+#endif
+
+
+#include "static_assert.h"
+#include "align.h"
 #include "atomic.h"
 #include "uintmap.h"
+#include "vector.h"
+#include "alstring.h"
 
 #ifndef ALC_SOFT_HRTF
 #define ALC_SOFT_HRTF 1
@@ -239,16 +254,17 @@ ALC_API void ALC_APIENTRY alcGetInteger64vSOFT(ALCdevice *device, ALCenum pname,
 #endif
 #endif
 
+#ifndef AL_SOFT_MSADPCM
+#define AL_SOFT_MSADPCM 1
+#define AL_FORMAT_MONO_MSADPCM_SOFT              0x1302
+#define AL_FORMAT_STEREO_MSADPCM_SOFT            0x1303
+#endif
+
 
 #ifdef IN_IDE_PARSER
 /* KDevelop's parser doesn't recognize the C99-standard restrict keyword, but
  * recent versions (at least 4.5.1) do recognize GCC's __restrict. */
 #define restrict __restrict
-/* KDevelop won't see the ALIGN macro from config.h when viewing files that
- * don't include it directly (e.g. headers). */
-#ifndef ALIGN
-#define ALIGN(x)
-#endif
 #endif
 
 
@@ -284,10 +300,12 @@ typedef ptrdiff_t ALsizeiptrEXT;
 #endif
 #endif
 
-#ifdef HAVE_GCC_FORMAT
-#define PRINTF_STYLE(x, y) __attribute__((format(printf, (x), (y))))
+#ifdef __GNUC__
+#define DECL_CONST __attribute__((const))
+#define DECL_FORMAT(x, y, z) __attribute__((format(x, (y), (z))))
 #else
-#define PRINTF_STYLE(x, y)
+#define DECL_CONST
+#define DECL_FORMAT(x, y, z)
 #endif
 
 #if defined(__GNUC__) && defined(__i386__)
@@ -298,6 +316,20 @@ typedef ptrdiff_t ALsizeiptrEXT;
 #define FORCE_ALIGN __attribute__((force_align_arg_pointer))
 #else
 #define FORCE_ALIGN
+#endif
+
+#ifdef HAVE_C99_VLA
+#define DECL_VLA(T, _name, _size)  T _name[(_size)]
+#else
+#define DECL_VLA(T, _name, _size)  T *_name = alloca((_size) * sizeof(T))
+#endif
+
+#ifndef PATH_MAX
+#ifdef MAX_PATH
+#define PATH_MAX MAX_PATH
+#else
+#define PATH_MAX 4096
+#endif
 #endif
 
 
@@ -312,8 +344,15 @@ static const union {
 
 #define DERIVE_FROM_TYPE(t)          t t##_parent
 #define STATIC_CAST(to, obj)         (&(obj)->to##_parent)
+#ifdef __GNUC__
+#define STATIC_UPCAST(to, from, obj) __extension__({                          \
+    static_assert(__builtin_types_compatible_p(from, __typeof(*(obj))),       \
+                  "Invalid upcast object from type");                         \
+    (to*)((char*)(obj) - offsetof(to, from##_parent));                        \
+})
+#else
 #define STATIC_UPCAST(to, from, obj) ((to*)((char*)(obj) - offsetof(to, from##_parent)))
-
+#endif
 
 #define DECLARE_FORWARD(T1, T2, rettype, func)                                \
 rettype T1##_##func(T1 *obj)                                                  \
@@ -354,6 +393,9 @@ static rettype T1##_##T2##_##func(T2 *obj, argtype1 a, argtype2 b)            \
 static rettype T1##_##T2##_##func(T2 *obj, argtype1 a, argtype2 b, argtype3 c) \
 { return T1##_##func(STATIC_UPCAST(T1, T2, obj), a, b, c); }
 
+#define DECLARE_DEFAULT_ALLOCATORS(T)                                         \
+static void* T##_New(size_t size) { return malloc(size); }                    \
+static void T##_Delete(void *ptr) { free(ptr); }
 
 /* Helper to extract an argument list for VCALL. Not used directly. */
 #define EXTRACT_VCALL_ARGS(...)  __VA_ARGS__))
@@ -448,12 +490,6 @@ void alc_solaris_probe(enum DevProbe type);
 ALCboolean alc_sndio_init(BackendFuncs *func_list);
 void alc_sndio_deinit(void);
 void alc_sndio_probe(enum DevProbe type);
-ALCboolean alcMMDevApiInit(BackendFuncs *func_list);
-void alcMMDevApiDeinit(void);
-void alcMMDevApiProbe(enum DevProbe type);
-ALCboolean alcDSoundInit(BackendFuncs *func_list);
-void alcDSoundDeinit(void);
-void alcDSoundProbe(enum DevProbe type);
 ALCboolean alcWinMMInit(BackendFuncs *FuncList);
 void alcWinMMDeinit(void);
 void alcWinMMProbe(enum DevProbe type);
@@ -537,8 +573,8 @@ enum DevFmtChannels {
     DevFmtChannelsDefault = DevFmtStereo
 };
 
-ALuint BytesFromDevFmt(enum DevFmtType type);
-ALuint ChannelsFromDevFmt(enum DevFmtChannels chans);
+ALuint BytesFromDevFmt(enum DevFmtType type) DECL_CONST;
+ALuint ChannelsFromDevFmt(enum DevFmtChannels chans) DECL_CONST;
 inline ALuint FrameSizeFromDevFmt(enum DevFmtChannels chans, enum DevFmtType type)
 {
     return ChannelsFromDevFmt(chans) * BytesFromDevFmt(type);
@@ -570,7 +606,7 @@ enum DeviceType {
 
 struct ALCdevice_struct
 {
-    volatile RefCount ref;
+    RefCount ref;
 
     ALCboolean Connected;
     enum DeviceType Type;
@@ -581,7 +617,7 @@ struct ALCdevice_struct
     enum DevFmtChannels FmtChans;
     enum DevFmtType     FmtType;
 
-    ALCchar      *DeviceName;
+    al_string DeviceName;
 
     volatile ALCenum LastError;
 
@@ -637,15 +673,20 @@ struct ALCdevice_struct
     ALuint64 ClockBase;
     ALuint SamplesDone;
 
-    /* Temp storage used for mixing. +1 for the predictive sample. */
-    ALIGN(16) ALfloat SampleData1[BUFFERSIZE+1];
-    ALIGN(16) ALfloat SampleData2[BUFFERSIZE+1];
+    /* Temp storage used for each source when mixing. */
+    alignas(16) ALfloat SourceData[BUFFERSIZE];
+    alignas(16) ALfloat ResampledData[BUFFERSIZE];
+    alignas(16) ALfloat FilteredData[BUFFERSIZE];
 
     // Dry path buffer mix
-    ALIGN(16) ALfloat DryBuffer[MaxChannels][BUFFERSIZE];
+    alignas(16) ALfloat DryBuffer[MaxChannels][BUFFERSIZE];
 
-    ALIGN(16) ALfloat ClickRemoval[MaxChannels];
-    ALIGN(16) ALfloat PendingClicks[MaxChannels];
+    /* Running count of the mixer invocations, in 31.1 fixed point. This
+     * actually increments *twice* when mixing, first at the start and then at
+     * the end, so the bottom bit indicates if the device is currently mixing
+     * and the upper bits indicates how many mixes have been done.
+     */
+    RefCount MixCount;
 
     /* Default effect slot */
     struct ALeffectslot *DefaultSlot;
@@ -655,10 +696,12 @@ struct ALCdevice_struct
 
     struct ALCbackend *Backend;
 
-    BackendFuncs *Funcs;
     void         *ExtraData; // For the backend's use
 
     ALCdevice *volatile next;
+
+    /* Memory space used by the default slot (Playback devices only) */
+    alignas(16) ALCbyte _slot_mem[];
 };
 
 // Frequency was requested by the app or config file
@@ -692,9 +735,13 @@ struct ALCdevice_struct
 #define MIXER_THREAD_NAME "alsoft-mixer"
 
 
+typedef struct ALeffectslot *ALeffectslotPtr;
+DECL_VECTOR(ALeffectslotPtr)
+
+
 struct ALCcontext_struct
 {
-    volatile RefCount ref;
+    RefCount ref;
 
     struct ALlistener *Listener;
 
@@ -713,18 +760,19 @@ struct ALCcontext_struct
     volatile ALfloat SpeedOfSound;
     volatile ALenum  DeferUpdates;
 
-    struct ALsource **ActiveSources;
-    ALsizei           ActiveSourceCount;
-    ALsizei           MaxActiveSources;
+    struct ALactivesource **ActiveSources;
+    ALsizei ActiveSourceCount;
+    ALsizei MaxActiveSources;
 
-    struct ALeffectslot **ActiveEffectSlots;
-    ALsizei               ActiveEffectSlotCount;
-    ALsizei               MaxActiveEffectSlots;
+    vector_ALeffectslotPtr ActiveAuxSlots;
 
     ALCdevice  *Device;
     const ALCchar *ExtensionList;
 
     ALCcontext *volatile next;
+
+    /* Memory space used by the listener */
+    alignas(16) ALCbyte _listener_mem[];
 };
 
 ALCcontext *GetContextRef(void);
@@ -789,31 +837,17 @@ void SetRTPriority(void);
 void SetDefaultChannelOrder(ALCdevice *device);
 void SetDefaultWFXChannelOrder(ALCdevice *device);
 
-const ALCchar *DevFmtTypeString(enum DevFmtType type);
-const ALCchar *DevFmtChannelsString(enum DevFmtChannels chans);
-
-#define HRIR_BITS        (7)
-#define HRIR_LENGTH      (1<<HRIR_BITS)
-#define HRIR_MASK        (HRIR_LENGTH-1)
-#define HRTFDELAY_BITS    (20)
-#define HRTFDELAY_FRACONE (1<<HRTFDELAY_BITS)
-#define HRTFDELAY_MASK    (HRTFDELAY_FRACONE-1)
-const struct Hrtf *GetHrtf(ALCdevice *device);
-void FindHrtfFormat(const ALCdevice *device, enum DevFmtChannels *chans, ALCuint *srate);
-void FreeHrtfs(void);
-ALuint GetHrtfIrSize(const struct Hrtf *Hrtf);
-ALfloat CalcHrtfDelta(ALfloat oldGain, ALfloat newGain, const ALfloat olddir[3], const ALfloat newdir[3]);
-void GetLerpedHrtfCoeffs(const struct Hrtf *Hrtf, ALfloat elevation, ALfloat azimuth, ALfloat gain, ALfloat (*coeffs)[2], ALuint *delays);
-ALuint GetMovingHrtfCoeffs(const struct Hrtf *Hrtf, ALfloat elevation, ALfloat azimuth, ALfloat gain, ALfloat delta, ALint counter, ALfloat (*coeffs)[2], ALuint *delays, ALfloat (*coeffStep)[2], ALint *delayStep);
+const ALCchar *DevFmtTypeString(enum DevFmtType type) DECL_CONST;
+const ALCchar *DevFmtChannelsString(enum DevFmtChannels chans) DECL_CONST;
 
 
 extern FILE *LogFile;
 
-#ifdef __GNUC__
+#if defined(__GNUC__) && !defined(IN_IDE_PARSER)
 #define AL_PRINT(T, MSG, ...) fprintf(LogFile, "AL lib: %s %s: "MSG, T, __FUNCTION__ , ## __VA_ARGS__)
 #else
-void al_print(const char *type, const char *func, const char *fmt, ...) PRINTF_STYLE(3,4);
-#define AL_PRINT(T, MSG, ...) al_print((T), __FUNCTION__, MSG, __VA_ARGS__)
+void al_print(const char *type, const char *func, const char *fmt, ...) DECL_FORMAT(printf, 3,4);
+#define AL_PRINT(T, ...) al_print((T), __FUNCTION__, __VA_ARGS__)
 #endif
 
 enum LogLevel {
@@ -853,11 +887,13 @@ extern ALuint CPUCapFlags;
 enum {
     CPU_CAP_SSE    = 1<<0,
     CPU_CAP_SSE2   = 1<<1,
-    CPU_CAP_NEON   = 1<<2,
+    CPU_CAP_SSE4_1 = 1<<2,
+    CPU_CAP_NEON   = 1<<3,
 };
 
 void FillCPUCaps(ALuint capfilter);
 
+FILE *OpenDataFile(const char *fname, const char *subdir);
 
 /* Small hack to use a pointer-to-array type as a normal argument type.
  * Shouldn't be used directly. */

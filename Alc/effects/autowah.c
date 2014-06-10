@@ -71,8 +71,8 @@ static ALvoid ALautowahState_update(ALautowahState *state, ALCdevice *device, co
     attackTime = slot->EffectProps.Autowah.AttackTime * state->Frequency;
     releaseTime = slot->EffectProps.Autowah.ReleaseTime * state->Frequency;
 
-    state->AttackRate = 1.0f / attackTime;
-    state->ReleaseRate = 1.0f / releaseTime;
+    state->AttackRate = powf(1.0f/GAIN_SILENCE_THRESHOLD, 1.0f/attackTime);
+    state->ReleaseRate = powf(GAIN_SILENCE_THRESHOLD/1.0f, 1.0f/releaseTime);
     state->PeakGain = slot->EffectProps.Autowah.PeakGain;
     state->Resonance = slot->EffectProps.Autowah.Resonance;
 
@@ -102,9 +102,9 @@ static ALvoid ALautowahState_process(ALautowahState *state, ALuint SamplesToDo, 
              * incoming signal, and attack or release to reach it. */
             amplitude = fabsf(smp);
             if(amplitude > gain)
-                gain = minf(gain+state->AttackRate, amplitude);
+                gain = minf(gain*state->AttackRate, amplitude);
             else if(amplitude < gain)
-                gain = maxf(gain-state->ReleaseRate, amplitude);
+                gain = maxf(gain*state->ReleaseRate, amplitude);
             gain = maxf(gain, GAIN_SILENCE_THRESHOLD);
 
             /* FIXME: What range does the filter cover? */
@@ -151,10 +151,7 @@ static ALvoid ALautowahState_process(ALautowahState *state, ALuint SamplesToDo, 
     }
 }
 
-static void ALautowahState_Delete(ALautowahState *state)
-{
-    free(state);
-}
+DECLARE_DEFAULT_ALLOCATORS(ALautowahState)
 
 DEFINE_ALEFFECTSTATE_VTABLE(ALautowahState);
 
@@ -167,13 +164,13 @@ static ALeffectState *ALautowahStateFactory_create(ALautowahStateFactory *UNUSED
 {
     ALautowahState *state;
 
-    state = malloc(sizeof(*state));
+    state = ALautowahState_New(sizeof(*state));
     if(!state) return NULL;
     SET_VTABLE2(ALautowahState, ALeffectState, state);
 
-    state->AttackRate = 0.0f;
-    state->ReleaseRate = 0.0f;
-    state->Resonance = 0.0f;
+    state->AttackRate = 1.0f;
+    state->ReleaseRate = 1.0f;
+    state->Resonance = 2.0f;
     state->PeakGain = 1.0f;
     state->GainCtrl = 1.0f;
 
