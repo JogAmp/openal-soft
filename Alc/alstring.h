@@ -7,15 +7,16 @@
 
 
 typedef char al_string_char_type;
-DECL_VECTOR(al_string_char_type)
+TYPEDEF_VECTOR(al_string_char_type, al_string)
+TYPEDEF_VECTOR(al_string, vector_al_string)
 
-typedef vector_al_string_char_type al_string;
-typedef const_vector_al_string_char_type const_al_string;
+inline void al_string_deinit(al_string *str)
+{ VECTOR_DEINIT(*str); }
+#define AL_STRING_INIT(_x)       do { (_x) = (al_string)NULL; } while(0)
+#define AL_STRING_INIT_STATIC()  ((al_string)NULL)
+#define AL_STRING_DEINIT(_x)     al_string_deinit(&(_x))
 
-#define AL_STRING_INIT(_x)   VECTOR_INIT(_x)
-#define AL_STRING_DEINIT(_x) VECTOR_DEINIT(_x)
-
-inline ALsizei al_string_length(const_al_string str)
+inline size_t al_string_length(const_al_string str)
 { return VECTOR_SIZE(str); }
 
 inline ALboolean al_string_empty(const_al_string str)
@@ -40,9 +41,8 @@ void al_string_append_range(al_string *str, const al_string_char_type *from, con
 #include <wchar.h>
 /* Windows-only methods to deal with WideChar strings. */
 void al_string_copy_wcstr(al_string *str, const wchar_t *from);
+void al_string_append_wcstr(al_string *str, const wchar_t *from);
+void al_string_append_wrange(al_string *str, const wchar_t *from, const wchar_t *to);
 #endif
-
-
-DECL_VECTOR(al_string)
 
 #endif /* ALSTRING_H */

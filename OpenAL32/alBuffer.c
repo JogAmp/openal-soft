@@ -13,8 +13,8 @@
  *
  * You should have received a copy of the GNU Library General Public
  *  License along with this library; if not, write to the
- *  Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- *  Boston, MA  02111-1307, USA.
+ *  Free Software Foundation, Inc.,
+ *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  * Or go to http://www.gnu.org/copyleft/lgpl.html
  */
 
@@ -41,7 +41,6 @@ extern inline struct ALbuffer *RemoveBuffer(ALCdevice *device, ALuint id);
 extern inline ALuint FrameSizeFromUserFmt(enum UserFmtChannels chans, enum UserFmtType type);
 extern inline ALuint FrameSizeFromFmt(enum FmtChannels chans, enum FmtType type);
 
-static ALenum LoadData(ALbuffer *ALBuf, ALuint freq, ALenum NewFormat, ALsizei frames, enum UserFmtChannels chans, enum UserFmtType type, const ALvoid *data, ALsizei align, ALboolean storesrc);
 static ALboolean IsValidType(ALenum type) DECL_CONST;
 static ALboolean IsValidChannels(ALenum channels) DECL_CONST;
 static ALboolean DecomposeUserFormat(ALenum format, enum UserFmtChannels *chans, enum UserFmtType *type) DECL_CONST;
@@ -51,10 +50,8 @@ static ALboolean SanitizeAlignment(enum UserFmtType type, ALsizei *align);
 
 AL_API ALvoid AL_APIENTRY alGenBuffers(ALsizei n, ALuint *buffers)
 {
-    ALCdevice *device;
     ALCcontext *context;
     ALsizei cur = 0;
-    ALenum err;
 
     context = GetContextRef();
     if(!context) return;
@@ -62,28 +59,13 @@ AL_API ALvoid AL_APIENTRY alGenBuffers(ALsizei n, ALuint *buffers)
     if(!(n >= 0))
         SET_ERROR_AND_GOTO(context, AL_INVALID_VALUE, done);
 
-    device = context->Device;
     for(cur = 0;cur < n;cur++)
     {
-        ALbuffer *buffer = calloc(1, sizeof(ALbuffer));
+        ALbuffer *buffer = NewBuffer(context);
         if(!buffer)
         {
             alDeleteBuffers(cur, buffers);
-            SET_ERROR_AND_GOTO(context, AL_OUT_OF_MEMORY, done);
-        }
-        RWLockInit(&buffer->lock);
-
-        err = NewThunkEntry(&buffer->id);
-        if(err == AL_NO_ERROR)
-            err = InsertUIntMapEntry(&device->BufferMap, buffer->id, buffer);
-        if(err != AL_NO_ERROR)
-        {
-            FreeThunkEntry(buffer->id);
-            memset(buffer, 0, sizeof(ALbuffer));
-            free(buffer);
-
-            alDeleteBuffers(cur, buffers);
-            SET_ERROR_AND_GOTO(context, err, done);
+            break;
         }
 
         buffers[cur] = buffer->id;
@@ -121,14 +103,8 @@ AL_API ALvoid AL_APIENTRY alDeleteBuffers(ALsizei n, const ALuint *buffers)
 
     for(i = 0;i < n;i++)
     {
-        if((ALBuf=RemoveBuffer(device, buffers[i])) == NULL)
-            continue;
-        FreeThunkEntry(ALBuf->id);
-
-        free(ALBuf->data);
-
-        memset(ALBuf, 0, sizeof(*ALBuf));
-        free(ALBuf);
+        if((ALBuf=LookupBuffer(device, buffers[i])) != NULL)
+            DeleteBuffer(device, ALBuf);
     }
 
 done:
@@ -175,7 +151,7 @@ AL_API ALvoid AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoi
     if(DecomposeUserFormat(format, &srcchannels, &srctype) == AL_FALSE)
         SET_ERROR_AND_GOTO(context, AL_INVALID_ENUM, done);
 
-    align = albuf->UnpackAlign;
+    align = ATOMIC_LOAD(&albuf->UnpackAlign);
     if(SanitizeAlignment(srctype, &align) == AL_FALSE)
         SET_ERROR_AND_GOTO(context, AL_INVALID_VALUE, done);
     switch(srctype)
@@ -213,6 +189,8 @@ AL_API ALvoid AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoi
                 case UserFmtX51: newformat = AL_FORMAT_51CHN32; break;
                 case UserFmtX61: newformat = AL_FORMAT_61CHN32; break;
                 case UserFmtX71: newformat = AL_FORMAT_71CHN32; break;
+                case UserFmtBFormat2D: newformat = AL_FORMAT_BFORMAT2D_FLOAT32; break;
+                case UserFmtBFormat3D: newformat = AL_FORMAT_BFORMAT3D_FLOAT32; break;
             }
             err = LoadData(albuf, freq, newformat, size/framesize*align,
                            srcchannels, srctype, data, align, AL_TRUE);
@@ -235,6 +213,8 @@ AL_API ALvoid AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoi
                 case UserFmtX51: newformat = AL_FORMAT_51CHN16; break;
                 case UserFmtX61: newformat = AL_FORMAT_61CHN16; break;
                 case UserFmtX71: newformat = AL_FORMAT_71CHN16; break;
+                case UserFmtBFormat2D: newformat = AL_FORMAT_BFORMAT2D_16; break;
+                case UserFmtBFormat3D: newformat = AL_FORMAT_BFORMAT3D_16; break;
             }
             err = LoadData(albuf, freq, newformat, size/framesize*align,
                            srcchannels, srctype, data, align, AL_TRUE);
@@ -257,6 +237,8 @@ AL_API ALvoid AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoi
                 case UserFmtX51: newformat = AL_FORMAT_51CHN16; break;
                 case UserFmtX61: newformat = AL_FORMAT_61CHN16; break;
                 case UserFmtX71: newformat = AL_FORMAT_71CHN16; break;
+                case UserFmtBFormat2D: newformat = AL_FORMAT_BFORMAT2D_16; break;
+                case UserFmtBFormat3D: newformat = AL_FORMAT_BFORMAT3D_16; break;
             }
             err = LoadData(albuf, freq, newformat, size/framesize*align,
                            srcchannels, srctype, data, align, AL_TRUE);
@@ -279,6 +261,8 @@ AL_API ALvoid AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoi
                 case UserFmtX51: newformat = AL_FORMAT_51CHN16; break;
                 case UserFmtX61: newformat = AL_FORMAT_61CHN16; break;
                 case UserFmtX71: newformat = AL_FORMAT_71CHN16; break;
+                case UserFmtBFormat2D: newformat = AL_FORMAT_BFORMAT2D_16; break;
+                case UserFmtBFormat3D: newformat = AL_FORMAT_BFORMAT3D_16; break;
             }
             err = LoadData(albuf, freq, newformat, size/framesize*align,
                            srcchannels, srctype, data, align, AL_TRUE);
@@ -315,7 +299,7 @@ AL_API ALvoid AL_APIENTRY alBufferSubDataSOFT(ALuint buffer, ALenum format, cons
         SET_ERROR_AND_GOTO(context, AL_INVALID_ENUM, done);
 
     WriteLock(&albuf->lock);
-    align = albuf->UnpackAlign;
+    align = ATOMIC_LOAD(&albuf->UnpackAlign);
     if(SanitizeAlignment(srctype, &align) == AL_FALSE)
     {
         WriteUnlock(&albuf->lock);
@@ -392,7 +376,7 @@ AL_API void AL_APIENTRY alBufferSamplesSOFT(ALuint buffer,
     if(IsValidType(type) == AL_FALSE || IsValidChannels(channels) == AL_FALSE)
         SET_ERROR_AND_GOTO(context, AL_INVALID_ENUM, done);
 
-    align = albuf->UnpackAlign;
+    align = ATOMIC_LOAD(&albuf->UnpackAlign);
     if(SanitizeAlignment(type, &align) == AL_FALSE)
         SET_ERROR_AND_GOTO(context, AL_INVALID_VALUE, done);
     if((samples%align) != 0)
@@ -428,7 +412,7 @@ AL_API void AL_APIENTRY alBufferSubSamplesSOFT(ALuint buffer,
         SET_ERROR_AND_GOTO(context, AL_INVALID_ENUM, done);
 
     WriteLock(&albuf->lock);
-    align = albuf->UnpackAlign;
+    align = ATOMIC_LOAD(&albuf->UnpackAlign);
     if(SanitizeAlignment(type, &align) == AL_FALSE)
     {
         WriteUnlock(&albuf->lock);
@@ -481,7 +465,7 @@ AL_API void AL_APIENTRY alGetBufferSamplesSOFT(ALuint buffer,
         SET_ERROR_AND_GOTO(context, AL_INVALID_ENUM, done);
 
     ReadLock(&albuf->lock);
-    align = albuf->PackAlign;
+    align = ATOMIC_LOAD(&albuf->PackAlign);
     if(SanitizeAlignment(type, &align) == AL_FALSE)
     {
         ReadUnlock(&albuf->lock);
@@ -620,13 +604,13 @@ AL_API void AL_APIENTRY alBufferi(ALuint buffer, ALenum param, ALint value)
     case AL_UNPACK_BLOCK_ALIGNMENT_SOFT:
         if(!(value >= 0))
             SET_ERROR_AND_GOTO(context, AL_INVALID_VALUE, done);
-        ExchangeInt(&albuf->UnpackAlign, value);
+        ATOMIC_STORE(&albuf->UnpackAlign, value);
         break;
 
     case AL_PACK_BLOCK_ALIGNMENT_SOFT:
         if(!(value >= 0))
             SET_ERROR_AND_GOTO(context, AL_INVALID_VALUE, done);
-        ExchangeInt(&albuf->PackAlign, value);
+        ATOMIC_STORE(&albuf->PackAlign, value);
         break;
 
     default:
@@ -858,11 +842,11 @@ AL_API ALvoid AL_APIENTRY alGetBufferi(ALuint buffer, ALenum param, ALint *value
         break;
 
     case AL_UNPACK_BLOCK_ALIGNMENT_SOFT:
-        *value = albuf->UnpackAlign;
+        *value = ATOMIC_LOAD(&albuf->UnpackAlign);
         break;
 
     case AL_PACK_BLOCK_ALIGNMENT_SOFT:
-        *value = albuf->PackAlign;
+        *value = ATOMIC_LOAD(&albuf->PackAlign);
         break;
 
     default:
@@ -954,7 +938,7 @@ done:
  * Currently, the new format must have the same channel configuration as the
  * original format.
  */
-static ALenum LoadData(ALbuffer *ALBuf, ALuint freq, ALenum NewFormat, ALsizei frames, enum UserFmtChannels SrcChannels, enum UserFmtType SrcType, const ALvoid *data, ALsizei align, ALboolean storesrc)
+ALenum LoadData(ALbuffer *ALBuf, ALuint freq, ALenum NewFormat, ALsizei frames, enum UserFmtChannels SrcChannels, enum UserFmtType SrcType, const ALvoid *data, ALsizei align, ALboolean storesrc)
 {
     ALuint NewChannels, NewBytes;
     enum FmtChannels DstChannels;
@@ -1069,6 +1053,8 @@ ALuint ChannelsFromUserFmt(enum UserFmtChannels chans)
     case UserFmtX51: return 6;
     case UserFmtX61: return 7;
     case UserFmtX71: return 8;
+    case UserFmtBFormat2D: return 3;
+    case UserFmtBFormat3D: return 4;
     }
     return 0;
 }
@@ -1125,6 +1111,16 @@ static ALboolean DecomposeUserFormat(ALenum format, enum UserFmtChannels *chans,
         { AL_FORMAT_71CHN16,     UserFmtX71, UserFmtShort },
         { AL_FORMAT_71CHN32,     UserFmtX71, UserFmtFloat },
         { AL_FORMAT_71CHN_MULAW, UserFmtX71, UserFmtMulaw },
+
+        { AL_FORMAT_BFORMAT2D_8,       UserFmtBFormat2D, UserFmtUByte },
+        { AL_FORMAT_BFORMAT2D_16,      UserFmtBFormat2D, UserFmtShort },
+        { AL_FORMAT_BFORMAT2D_FLOAT32, UserFmtBFormat2D, UserFmtFloat },
+        { AL_FORMAT_BFORMAT2D_MULAW,   UserFmtBFormat2D, UserFmtMulaw },
+
+        { AL_FORMAT_BFORMAT3D_8,       UserFmtBFormat3D, UserFmtUByte },
+        { AL_FORMAT_BFORMAT3D_16,      UserFmtBFormat3D, UserFmtShort },
+        { AL_FORMAT_BFORMAT3D_FLOAT32, UserFmtBFormat3D, UserFmtFloat },
+        { AL_FORMAT_BFORMAT3D_MULAW,   UserFmtBFormat3D, UserFmtMulaw },
     };
     ALuint i;
 
@@ -1162,6 +1158,8 @@ ALuint ChannelsFromFmt(enum FmtChannels chans)
     case FmtX51: return 6;
     case FmtX61: return 7;
     case FmtX71: return 8;
+    case FmtBFormat2D: return 3;
+    case FmtBFormat3D: return 4;
     }
     return 0;
 }
@@ -1202,6 +1200,14 @@ static ALboolean DecomposeFormat(ALenum format, enum FmtChannels *chans, enum Fm
         { AL_7POINT1_8_SOFT,   FmtX71, FmtByte  },
         { AL_7POINT1_16_SOFT,  FmtX71, FmtShort },
         { AL_7POINT1_32F_SOFT, FmtX71, FmtFloat },
+
+        { AL_FORMAT_BFORMAT2D_8,       FmtBFormat2D, FmtByte },
+        { AL_FORMAT_BFORMAT2D_16,      FmtBFormat2D, FmtShort },
+        { AL_FORMAT_BFORMAT2D_FLOAT32, FmtBFormat2D, FmtFloat },
+
+        { AL_FORMAT_BFORMAT3D_8,       FmtBFormat3D, FmtByte },
+        { AL_FORMAT_BFORMAT3D_16,      FmtBFormat3D, FmtShort },
+        { AL_FORMAT_BFORMAT3D_FLOAT32, FmtBFormat3D, FmtFloat },
     };
     ALuint i;
 
@@ -1290,6 +1296,44 @@ static ALboolean IsValidChannels(ALenum channels)
             return AL_TRUE;
     }
     return AL_FALSE;
+}
+
+
+ALbuffer *NewBuffer(ALCcontext *context)
+{
+    ALCdevice *device = context->Device;
+    ALbuffer *buffer;
+    ALenum err;
+
+    buffer = calloc(1, sizeof(ALbuffer));
+    if(!buffer)
+        SET_ERROR_AND_RETURN_VALUE(context, AL_OUT_OF_MEMORY, NULL);
+    RWLockInit(&buffer->lock);
+
+    err = NewThunkEntry(&buffer->id);
+    if(err == AL_NO_ERROR)
+        err = InsertUIntMapEntry(&device->BufferMap, buffer->id, buffer);
+    if(err != AL_NO_ERROR)
+    {
+        FreeThunkEntry(buffer->id);
+        memset(buffer, 0, sizeof(ALbuffer));
+        free(buffer);
+
+        SET_ERROR_AND_RETURN_VALUE(context, err, NULL);
+    }
+
+    return buffer;
+}
+
+void DeleteBuffer(ALCdevice *device, ALbuffer *buffer)
+{
+    RemoveBuffer(device, buffer->id);
+    FreeThunkEntry(buffer->id);
+
+    free(buffer->data);
+
+    memset(buffer, 0, sizeof(*buffer));
+    free(buffer);
 }
 
 
