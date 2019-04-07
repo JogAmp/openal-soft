@@ -1,6 +1,12 @@
 #ifndef AL_COMPAT_H
 #define AL_COMPAT_H
 
+#include "alstring.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #ifdef _WIN32
 
 #define WIN32_LEAN_AND_MEAN
@@ -23,10 +29,29 @@ FILE *al_fopen(const char *fname, const char *mode);
 
 #endif
 
+struct FileMapping {
+#ifdef _WIN32
+    HANDLE file;
+    HANDLE fmap;
+#else
+    int fd;
+#endif
+    void *ptr;
+    size_t len;
+};
+struct FileMapping MapFileToMem(const char *fname);
+void UnmapFileMem(const struct FileMapping *mapping);
+
+void GetProcBinary(al_string *path, al_string *fname);
+
 #ifdef HAVE_DYNLOAD
 void *LoadLib(const char *name);
 void CloseLib(void *handle);
 void *GetSymbol(void *handle, const char *name);
+#endif
+
+#ifdef __cplusplus
+} /* extern "C" */
 #endif
 
 #endif /* AL_COMPAT_H */

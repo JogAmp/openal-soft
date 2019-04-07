@@ -55,13 +55,29 @@ extern inline int altss_set(altss_t tss_id, void *val);
 #endif
 
 
-#define THREAD_STACK_SIZE (1*1024*1024) /* 1MB */
+#define THREAD_STACK_SIZE (2*1024*1024) /* 2MB */
 
 #ifdef _WIN32
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <mmsystem.h>
+
+
+/* An associative map of uint:void* pairs. The key is the unique Thread ID and
+ * the value is the thread HANDLE. The thread ID is passed around as the
+ * althrd_t since there is only one ID per thread, whereas a thread may be
+ * referenced by multiple different HANDLEs. This map allows retrieving the
+ * original handle which is needed to join the thread and get its return value.
+ */
+static UIntMap ThrdIdHandle = UINTMAP_STATIC_INITIALIZE;
+
+/* An associative map of uint:void* pairs. The key is the TLS index (given by
+ * TlsAlloc), and the value is the altss_dtor_t callback. When a thread exits,
+ * we iterate over the TLS indices for their thread-local value and call the
+ * destructor function with it if they're both not NULL.
+ */
+static UIntMap TlsDestructors = UINTMAP_STATIC_INITIALIZE;
 
 
 void althrd_setname(althrd_t thr, const char *name)
@@ -92,23 +108,6 @@ void althrd_setname(althrd_t thr, const char *name)
     (void)name;
 #endif
 }
-
-
-static UIntMap ThrdIdHandle = UINTMAP_STATIC_INITIALIZE;
-
-static void NTAPI althrd_callback(void* UNUSED(handle), DWORD reason, void* UNUSED(reserved))
-{
-    if(reason == DLL_PROCESS_DETACH)
-        ResetUIntMap(&ThrdIdHandle);
-}
-#ifdef _MSC_VER
-#pragma section(".CRT$XLC",read)
-__declspec(allocate(".CRT$XLC")) PIMAGE_TLS_CALLBACK althrd_callback_ = althrd_callback;
-#elif defined(__GNUC__)
-PIMAGE_TLS_CALLBACK althrd_callback_ __attribute__((section(".CRT$XLC"))) = althrd_callback;
-#else
-PIMAGE_TLS_CALLBACK althrd_callback_ = althrd_callback;
-#endif
 
 
 typedef struct thread_cntr {
@@ -194,7 +193,8 @@ int althrd_sleep(const struct timespec *ts, struct timespec* UNUSED(rem))
 int almtx_init(almtx_t *mtx, int type)
 {
     if(!mtx) return althrd_error;
-    type &= ~(almtx_recursive|almtx_timed);
+
+    type &= ~almtx_recursive;
     if(type != almtx_plain)
         return althrd_error;
 
@@ -205,29 +205,6 @@ int almtx_init(almtx_t *mtx, int type)
 void almtx_destroy(almtx_t *mtx)
 {
     DeleteCriticalSection(mtx);
-}
-
-int almtx_timedlock(almtx_t *mtx, const struct timespec *ts)
-{
-    int ret;
-
-    if(!mtx || !ts)
-        return althrd_error;
-
-    while((ret=almtx_trylock(mtx)) == althrd_busy)
-    {
-        struct timespec now;
-
-        if(ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000 ||
-           altimespec_get(&now, AL_TIME_UTC) != AL_TIME_UTC)
-            return althrd_error;
-        if(now.tv_sec > ts->tv_sec || (now.tv_sec == ts->tv_sec && now.tv_nsec >= ts->tv_nsec))
-            return althrd_timedout;
-
-        althrd_yield();
-    }
-
-    return ret;
 }
 
 #if defined(_WIN32_WINNT) && _WIN32_WINNT >= 0x0600
@@ -254,21 +231,6 @@ int alcnd_wait(alcnd_t *cond, almtx_t *mtx)
     if(SleepConditionVariableCS(cond, mtx, INFINITE) != 0)
         return althrd_success;
     return althrd_error;
-}
-
-int alcnd_timedwait(alcnd_t *cond, almtx_t *mtx, const struct timespec *time_point)
-{
-    struct timespec curtime;
-    DWORD sleeptime;
-
-    if(altimespec_get(&curtime, AL_TIME_UTC) != AL_TIME_UTC)
-        return althrd_error;
-
-    sleeptime  = (time_point->tv_nsec - curtime.tv_nsec + 999999)/1000000;
-    sleeptime += (time_point->tv_sec - curtime.tv_sec)*1000;
-    if(SleepConditionVariableCS(cond, mtx, sleeptime) != 0)
-        return althrd_success;
-    return (GetLastError()==ERROR_TIMEOUT) ? althrd_timedout : althrd_error;
 }
 
 void alcnd_destroy(alcnd_t* UNUSED(cond))
@@ -306,8 +268,8 @@ int alcnd_init(alcnd_t *cond)
 
     InitRef(&icond->wait_count, 0);
 
-    icond->events[SIGNAL] = CreateEvent(NULL, FALSE, FALSE, NULL);
-    icond->events[BROADCAST] = CreateEvent(NULL, TRUE, FALSE, NULL);
+    icond->events[SIGNAL] = CreateEventW(NULL, FALSE, FALSE, NULL);
+    icond->events[BROADCAST] = CreateEventW(NULL, TRUE, FALSE, NULL);
     if(!icond->events[SIGNAL] || !icond->events[BROADCAST])
     {
         if(icond->events[SIGNAL])
@@ -355,30 +317,6 @@ int alcnd_wait(alcnd_t *cond, almtx_t *mtx)
     return althrd_success;
 }
 
-int alcnd_timedwait(alcnd_t *cond, almtx_t *mtx, const struct timespec *time_point)
-{
-    _int_alcnd_t *icond = cond->Ptr;
-    struct timespec curtime;
-    DWORD sleeptime;
-    int res;
-
-    if(altimespec_get(&curtime, AL_TIME_UTC) != AL_TIME_UTC)
-        return althrd_error;
-    sleeptime  = (time_point->tv_nsec - curtime.tv_nsec + 999999)/1000000;
-    sleeptime += (time_point->tv_sec - curtime.tv_sec)*1000;
-
-    IncrementRef(&icond->wait_count);
-    LeaveCriticalSection(mtx);
-
-    res = WaitForMultipleObjects(2, icond->events, FALSE, sleeptime);
-
-    if(DecrementRef(&icond->wait_count) == 0 && res == WAIT_OBJECT_0+BROADCAST)
-        ResetEvent(icond->events[BROADCAST]);
-    EnterCriticalSection(mtx);
-
-    return (res == WAIT_TIMEOUT) ? althrd_timedout : althrd_success;
-}
-
 void alcnd_destroy(alcnd_t *cond)
 {
     _int_alcnd_t *icond = cond->Ptr;
@@ -389,46 +327,40 @@ void alcnd_destroy(alcnd_t *cond)
 #endif /* defined(_WIN32_WINNT) && _WIN32_WINNT >= 0x0600 */
 
 
-/* An associative map of uint:void* pairs. The key is the TLS index (given by
- * TlsAlloc), and the value is the altss_dtor_t callback. When a thread exits,
- * we iterate over the TLS indices for their thread-local value and call the
- * destructor function with it if they're both not NULL. To avoid using
- * DllMain, a PIMAGE_TLS_CALLBACK function pointer is placed in a ".CRT$XLx"
- * section (where x is a character A to Z) which will be called by the CRT.
- */
-static UIntMap TlsDestructors = UINTMAP_STATIC_INITIALIZE;
-
-static void NTAPI altss_callback(void* UNUSED(handle), DWORD reason, void* UNUSED(reserved))
+int alsem_init(alsem_t *sem, unsigned int initial)
 {
-    ALsizei i;
-
-    if(reason == DLL_PROCESS_DETACH)
-    {
-        ResetUIntMap(&TlsDestructors);
-        return;
-    }
-    if(reason != DLL_THREAD_DETACH)
-        return;
-
-    LockUIntMapRead(&TlsDestructors);
-    for(i = 0;i < TlsDestructors.size;i++)
-    {
-        void *ptr = altss_get(TlsDestructors.array[i].key);
-        altss_dtor_t callback = (altss_dtor_t)TlsDestructors.array[i].value;
-        if(ptr && callback)
-            callback(ptr);
-    }
-    UnlockUIntMapRead(&TlsDestructors);
+    *sem = CreateSemaphore(NULL, initial, INT_MAX, NULL);
+    if(*sem != NULL) return althrd_success;
+    return althrd_error;
 }
-#ifdef _MSC_VER
-#pragma section(".CRT$XLB",read)
-__declspec(allocate(".CRT$XLB")) PIMAGE_TLS_CALLBACK altss_callback_ = altss_callback;
-#elif defined(__GNUC__)
-PIMAGE_TLS_CALLBACK altss_callback_ __attribute__((section(".CRT$XLB"))) = altss_callback;
-#else
-#warning "No TLS callback support, thread-local contexts may leak references on poorly written applications."
-PIMAGE_TLS_CALLBACK altss_callback_ = altss_callback;
-#endif
+
+void alsem_destroy(alsem_t *sem)
+{
+    CloseHandle(*sem);
+}
+
+int alsem_post(alsem_t *sem)
+{
+    DWORD ret = ReleaseSemaphore(*sem, 1, NULL);
+    if(ret) return althrd_success;
+    return althrd_error;
+}
+
+int alsem_wait(alsem_t *sem)
+{
+    DWORD ret = WaitForSingleObject(*sem, INFINITE);
+    if(ret == WAIT_OBJECT_0) return althrd_success;
+    return althrd_error;
+}
+
+int alsem_trywait(alsem_t *sem)
+{
+    DWORD ret = WaitForSingleObject(*sem, 0);
+    if(ret == WAIT_OBJECT_0) return althrd_success;
+    if(ret == WAIT_TIMEOUT) return althrd_busy;
+    return althrd_error;
+}
+
 
 int altss_create(altss_t *tss_id, altss_dtor_t callback)
 {
@@ -480,6 +412,31 @@ void alcall_once(alonce_flag *once, void (*callback)(void))
     InterlockedExchange(once, 2);
 }
 
+
+void althrd_deinit(void)
+{
+    ResetUIntMap(&ThrdIdHandle);
+    ResetUIntMap(&TlsDestructors);
+}
+
+void althrd_thread_detach(void)
+{
+    ALsizei i;
+
+    LockUIntMapRead(&TlsDestructors);
+    for(i = 0;i < TlsDestructors.size;i++)
+    {
+        void *ptr = altss_get(TlsDestructors.keys[i]);
+        altss_dtor_t callback = (altss_dtor_t)TlsDestructors.values[i];
+        if(ptr)
+        {
+            if(callback) callback(ptr);
+            altss_set(TlsDestructors.keys[i], NULL);
+        }
+    }
+    UnlockUIntMapRead(&TlsDestructors);
+}
+
 #else
 
 #include <sys/time.h>
@@ -493,15 +450,19 @@ void alcall_once(alonce_flag *once, void (*callback)(void))
 extern inline int althrd_sleep(const struct timespec *ts, struct timespec *rem);
 extern inline void alcall_once(alonce_flag *once, void (*callback)(void));
 
+extern inline void althrd_deinit(void);
+extern inline void althrd_thread_detach(void);
 
 void althrd_setname(althrd_t thr, const char *name)
 {
 #if defined(HAVE_PTHREAD_SETNAME_NP)
-#if defined(__GNUC__)
-    pthread_setname_np(thr, name);
-#elif defined(__APPLE__)
-    if(althrd_equal(thr, althrd_current())
+#if defined(PTHREAD_SETNAME_NP_ONE_PARAM)
+    if(althrd_equal(thr, althrd_current()))
         pthread_setname_np(name);
+#elif defined(PTHREAD_SETNAME_NP_THREE_PARAMS)
+    pthread_setname_np(thr, "%s", (void*)name);
+#else
+    pthread_setname_np(thr, name);
 #endif
 #elif defined(HAVE_PTHREAD_SET_NAME_NP)
     pthread_set_name_np(thr, name);
@@ -531,6 +492,8 @@ int althrd_create(althrd_t *thr, althrd_start_t func, void *arg)
 {
     thread_cntr *cntr;
     pthread_attr_t attr;
+    size_t stackmult = 1;
+    int err;
 
     cntr = malloc(sizeof(*cntr));
     if(!cntr) return althrd_nomem;
@@ -540,7 +503,8 @@ int althrd_create(althrd_t *thr, althrd_start_t func, void *arg)
         free(cntr);
         return althrd_error;
     }
-    if(pthread_attr_setstacksize(&attr, THREAD_STACK_SIZE) != 0)
+retry_stacksize:
+    if(pthread_attr_setstacksize(&attr, THREAD_STACK_SIZE*stackmult) != 0)
     {
         pthread_attr_destroy(&attr);
         free(cntr);
@@ -549,15 +513,30 @@ int althrd_create(althrd_t *thr, althrd_start_t func, void *arg)
 
     cntr->func = func;
     cntr->arg = arg;
-    if(pthread_create(thr, &attr, althrd_starter, cntr) != 0)
+    if((err=pthread_create(thr, &attr, althrd_starter, cntr)) == 0)
     {
         pthread_attr_destroy(&attr);
-        free(cntr);
-        return althrd_error;
+        return althrd_success;
+    }
+
+    if(err == EINVAL)
+    {
+        /* If an invalid stack size, try increasing it (limit x4, 8MB). */
+        if(stackmult < 4)
+        {
+            stackmult *= 2;
+            goto retry_stacksize;
+        }
+        /* If still nothing, try defaults and hope they're good enough. */
+        if(pthread_create(thr, NULL, althrd_starter, cntr) == 0)
+        {
+            pthread_attr_destroy(&attr);
+            return althrd_success;
+        }
     }
     pthread_attr_destroy(&attr);
-
-    return althrd_success;
+    free(cntr);
+    return althrd_error;
 }
 
 int althrd_detach(althrd_t thr)
@@ -584,10 +563,9 @@ int almtx_init(almtx_t *mtx, int type)
     int ret;
 
     if(!mtx) return althrd_error;
-    if((type&~(almtx_recursive|almtx_timed)) != 0)
+    if((type&~almtx_recursive) != 0)
         return althrd_error;
 
-    type &= ~almtx_timed;
     if(type == almtx_plain)
         ret = pthread_mutex_init(mtx, NULL);
     else
@@ -619,40 +597,6 @@ void almtx_destroy(almtx_t *mtx)
     pthread_mutex_destroy(mtx);
 }
 
-int almtx_timedlock(almtx_t *mtx, const struct timespec *ts)
-{
-    int ret;
-
-#ifdef HAVE_PTHREAD_MUTEX_TIMEDLOCK
-    ret = pthread_mutex_timedlock(mtx, ts);
-    switch(ret)
-    {
-        case 0: return althrd_success;
-        case ETIMEDOUT: return althrd_timedout;
-        case EBUSY: return althrd_busy;
-    }
-    return althrd_error;
-#else
-    if(!mtx || !ts)
-        return althrd_error;
-
-    while((ret=almtx_trylock(mtx)) == althrd_busy)
-    {
-        struct timespec now;
-
-        if(ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000 ||
-           altimespec_get(&now, AL_TIME_UTC) != AL_TIME_UTC)
-            return althrd_error;
-        if(now.tv_sec > ts->tv_sec || (now.tv_sec == ts->tv_sec && now.tv_nsec >= ts->tv_nsec))
-            return althrd_timedout;
-
-        althrd_yield();
-    }
-
-    return ret;
-#endif
-}
-
 int alcnd_init(alcnd_t *cond)
 {
     if(pthread_cond_init(cond, NULL) == 0)
@@ -681,17 +625,80 @@ int alcnd_wait(alcnd_t *cond, almtx_t *mtx)
     return althrd_error;
 }
 
-int alcnd_timedwait(alcnd_t *cond, almtx_t *mtx, const struct timespec *time_point)
-{
-    if(pthread_cond_timedwait(cond, mtx, time_point) == 0)
-        return althrd_success;
-    return althrd_error;
-}
-
 void alcnd_destroy(alcnd_t *cond)
 {
     pthread_cond_destroy(cond);
 }
+
+
+#ifdef __APPLE__
+
+int alsem_init(alsem_t *sem, unsigned int initial)
+{
+    *sem = dispatch_semaphore_create(initial);
+    return *sem ? althrd_success : althrd_error;
+}
+
+void alsem_destroy(alsem_t *sem)
+{
+    dispatch_release(*sem);
+}
+
+int alsem_post(alsem_t *sem)
+{
+    dispatch_semaphore_signal(*sem);
+    return althrd_success;
+}
+
+int alsem_wait(alsem_t *sem)
+{
+    dispatch_semaphore_wait(*sem, DISPATCH_TIME_FOREVER);
+    return althrd_success;
+}
+
+int alsem_trywait(alsem_t *sem)
+{
+    long value = dispatch_semaphore_wait(*sem, DISPATCH_TIME_NOW);
+    return value == 0 ? althrd_success : althrd_busy;
+}
+
+#else /* !__APPLE__ */
+
+int alsem_init(alsem_t *sem, unsigned int initial)
+{
+    if(sem_init(sem, 0, initial) == 0)
+        return althrd_success;
+    return althrd_error;
+}
+
+void alsem_destroy(alsem_t *sem)
+{
+    sem_destroy(sem);
+}
+
+int alsem_post(alsem_t *sem)
+{
+    if(sem_post(sem) == 0)
+        return althrd_success;
+    return althrd_error;
+}
+
+int alsem_wait(alsem_t *sem)
+{
+    if(sem_wait(sem) == 0) return althrd_success;
+    if(errno == EINTR) return -2;
+    return althrd_error;
+}
+
+int alsem_trywait(alsem_t *sem)
+{
+    if(sem_trywait(sem) == 0) return althrd_success;
+    if(errno == EWOULDBLOCK) return althrd_busy;
+    if(errno == EINTR) return -2;
+    return althrd_error;
+}
+
+#endif /* __APPLE__ */
 
 
 int altss_create(altss_t *tss_id, altss_dtor_t callback)
