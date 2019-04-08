@@ -1289,6 +1289,8 @@ ELSE()
         "${OpenAL_BINARY_DIR}/version.h")
 ENDIF()
 
+IF(NOT CMAKE_CROSSCOMPILING)
+
 SET(NATIVE_SRC_DIR  "${OpenAL_SOURCE_DIR}/native-tools/")
 SET(NATIVE_BIN_DIR  "${OpenAL_BINARY_DIR}/native-tools/")
 FILE(MAKE_DIRECTORY "${NATIVE_BIN_DIR}")
@@ -1348,6 +1350,11 @@ IF(ALSOFT_EXAMPLES)
         FIND_PACKAGE(FFmpeg COMPONENTS AVFORMAT AVCODEC AVUTIL SWSCALE SWRESAMPLE)
     ENDIF()
 ENDIF()
+
+# For crosscompiling, caller must provide the bsinc_inc.h file
+# SET(ALC_OBJS  ${ALC_OBJS} "${OpenAL_BINARY_DIR}/bsinc_inc.h")
+
+ENDIF(NOT CMAKE_CROSSCOMPILING)
 
 IF(NOT WIN32)
     SET(LIBNAME "openal")
