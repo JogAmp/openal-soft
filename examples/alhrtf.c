@@ -24,11 +24,14 @@
 
 /* This file contains an example for selecting an HRTF. */
 
-#include <stdio.h>
 #include <assert.h>
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
 
-#include <SDL_sound.h>
+#include "SDL_sound.h"
+#include "SDL_audio.h"
+#include "SDL_stdinc.h"
 
 #include "AL/al.h"
 #include "AL/alc.h"
@@ -109,7 +112,7 @@ static ALuint LoadSound(const char *filename)
      * close the file. */
     buffer = 0;
     alGenBuffers(1, &buffer);
-    alBufferData(buffer, format, sample->buffer, slen, sample->actual.rate);
+    alBufferData(buffer, format, sample->buffer, (ALsizei)slen, (ALsizei)sample->actual.rate);
     Sound_FreeSample(sample);
 
     /* Check if an error occured, and clean up if so. */
@@ -129,6 +132,7 @@ static ALuint LoadSound(const char *filename)
 int main(int argc, char **argv)
 {
     ALCdevice *device;
+    ALCcontext *context;
     ALboolean has_angle_ext;
     ALuint source, buffer;
     const char *soundname;
@@ -150,7 +154,8 @@ int main(int argc, char **argv)
     if(InitAL(&argv, &argc) != 0)
         return 1;
 
-    device = alcGetContextsDevice(alcGetCurrentContext());
+    context = alcGetCurrentContext();
+    device = alcGetContextsDevice(context);
     if(!alcIsExtensionPresent(device, "ALC_SOFT_HRTF"))
     {
         fprintf(stderr, "Error: ALC_SOFT_HRTF not supported\n");
@@ -159,16 +164,16 @@ int main(int argc, char **argv)
     }
 
     /* Define a macro to help load the function pointers. */
-#define LOAD_PROC(d, x)  ((x) = alcGetProcAddress((d), #x))
-    LOAD_PROC(device, alcGetStringiSOFT);
-    LOAD_PROC(device, alcResetDeviceSOFT);
+#define LOAD_PROC(d, T, x)  ((x) = (T)alcGetProcAddress((d), #x))
+    LOAD_PROC(device, LPALCGETSTRINGISOFT, alcGetStringiSOFT);
+    LOAD_PROC(device, LPALCRESETDEVICESOFT, alcResetDeviceSOFT);
 #undef LOAD_PROC
 
     /* Check for the AL_EXT_STEREO_ANGLES extension to be able to also rotate
      * stereo sources.
      */
     has_angle_ext = alIsExtensionPresent("AL_EXT_STEREO_ANGLES");
-    printf("AL_EXT_STEREO_ANGLES%s found\n", has_angle_ext?"":" not");
+    printf("AL_EXT_STEREO_ANGLES %sfound\n", has_angle_ext?"":"not ");
 
     /* Check for user-preferred HRTF */
     if(strcmp(argv[0], "-hrtf") == 0)
@@ -252,7 +257,7 @@ int main(int argc, char **argv)
     alGenSources(1, &source);
     alSourcei(source, AL_SOURCE_RELATIVE, AL_TRUE);
     alSource3f(source, AL_POSITION, 0.0f, 0.0f, -1.0f);
-    alSourcei(source, AL_BUFFER, buffer);
+    alSourcei(source, AL_BUFFER, (ALint)buffer);
     assert(alGetError()==AL_NO_ERROR && "Failed to setup sound source");
 
     /* Play the sound until it finishes. */
@@ -260,6 +265,8 @@ int main(int argc, char **argv)
     alSourcePlay(source);
     do {
         al_nssleep(10000000);
+
+        alcSuspendContext(context);
 
         /* Rotate the source around the listener by about 1/4 cycle per second,
          * and keep it within -pi...+pi.
@@ -279,6 +286,7 @@ int main(int argc, char **argv)
             ALfloat angles[2] = { (ALfloat)(M_PI/6.0 - angle), (ALfloat)(-M_PI/6.0 - angle) };
             alSourcefv(source, AL_STEREO_ANGLES, angles);
         }
+        alcProcessContext(context);
 
         alGetSourcei(source, AL_SOURCE_STATE, &state);
     } while(alGetError() == AL_NO_ERROR && state == AL_PLAYING);

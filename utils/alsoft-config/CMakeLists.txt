@@ -8,6 +8,8 @@ set(alsoft-config_SRCS
     main.cpp
     mainwindow.cpp
     mainwindow.h
+    verstr.cpp
+    verstr.h
 )
 set(alsoft-config_UIS  mainwindow.ui)
 set(alsoft-config_MOCS  mainwindow.h)
@@ -20,6 +22,7 @@ if(Qt5Widgets_FOUND AND NOT ALSOFT_NO_QT5)
 
     add_executable(alsoft-config ${alsoft-config_SRCS} ${UIS} ${RSCS} ${TRS} ${MOCS})
     target_link_libraries(alsoft-config Qt5::Widgets)
+    target_include_directories(alsoft-config PRIVATE "${OpenAL_BINARY_DIR}")
     set_property(TARGET alsoft-config APPEND PROPERTY COMPILE_FLAGS ${EXTRA_CFLAGS})
     set_target_properties(alsoft-config PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${OpenAL_BINARY_DIR})
     if(TARGET build_version)
@@ -43,6 +46,7 @@ else()
 
         add_executable(alsoft-config ${alsoft-config_SRCS} ${UIS} ${RSCS} ${TRS} ${MOCS})
         target_link_libraries(alsoft-config ${QT_LIBRARIES})
+        target_include_directories(alsoft-config PRIVATE "${OpenAL_BINARY_DIR}")
         set_property(TARGET alsoft-config APPEND PROPERTY COMPILE_FLAGS ${EXTRA_CFLAGS})
         set_target_properties(alsoft-config PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${OpenAL_BINARY_DIR})
         if(TARGET build_version)
