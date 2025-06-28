@@ -64,6 +64,23 @@ endif(COMMAND CMAKE_POLICY)
 
 project(OpenAL)
 
+# CMAKE_TOOLCHAIN_FILE loaded right after project declaration (jau)
+message(STATUS "2: PKG_CONFIG_LIBDIR: ${PKG_CONFIG_LIBDIR}")
+message(STATUS "2: env PKG_CONFIG_LIBDIR: $ENV{PKG_CONFIG_LIBDIR}")
+message(STATUS "2: env PKG_CONFIG_PATH: $ENV{PKG_CONFIG_PATH}")
+if(PKG_CONFIG_LIBDIR)
+    # Passing env-var via CMAKE_TOOLCHAIN_FILE didn't work w/ cmake 3.25.1 on GNU/Linux (jau)
+    set(ENV{PKG_CONFIG_LIBDIR} "${PKG_CONFIG_LIBDIR}")
+    set(ENV{PKG_CONFIG_PATH} "")
+endif()
+message(STATUS "3: env PKG_CONFIG_LIBDIR: $ENV{PKG_CONFIG_LIBDIR}")
+
+message(STATUS "2: env PKG_CONFIG_SYSROOT_DIR: $ENV{PKG_CONFIG_SYSROOT_DIR}")
+if(PKG_CONFIG_SYSROOT_DIR)
+    set(ENV{PKG_CONFIG_SYSROOT_DIR} "${PKG_CONFIG_SYSROOT_DIR}")
+endif()
+message(STATUS "3: env PKG_CONFIG_SYSROOT_DIR: $ENV{PKG_CONFIG_SYSROOT_DIR}")
+
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING
         "Choose the type of build, options are: Debug Release RelWithDebInfo MinSizeRel."
@@ -220,6 +237,8 @@ set(LIB_VERSION_NUM ${LIB_MAJOR_VERSION},${LIB_MINOR_VERSION},${LIB_REVISION},0)
 
 set(EXPORT_DECL "")
 
+# jau
+message(STATUS "d1.5: env PKG_CONFIG_LIBDIR: $ENV{PKG_CONFIG_LIBDIR}")
 
 # Some systems erroneously require the __STDC_FORMAT_MACROS macro to be defined
 # to get the fixed-width integer type formatter macros.
@@ -231,6 +250,10 @@ int main()
     std::printf(\"%\" PRId64, i64);
 }"
 HAVE_STDC_FORMAT_MACROS)
+
+# jau: lost env var again between 1.5 .. 1.6
+message(STATUS "d1.6: env PKG_CONFIG_LIBDIR: $ENV{PKG_CONFIG_LIBDIR}")
+
 if(NOT HAVE_STDC_FORMAT_MACROS)
     set(CPP_DEFS ${CPP_DEFS} __STDC_FORMAT_MACROS)
 endif()
@@ -710,6 +733,20 @@ set(CORE_OBJS
     core/voice.cpp
     core/voice.h
     core/voice_change.h)
+
+# jau
+message(STATUS "10: env PKG_CONFIG_LIBDIR: $ENV{PKG_CONFIG_LIBDIR}")
+if(PKG_CONFIG_LIBDIR)
+    # Passing env-var via CMAKE_TOOLCHAIN_FILE didn't work w/ cmake 3.25.1 on GNU/Linux (jau)
+    set(ENV{PKG_CONFIG_LIBDIR} "${PKG_CONFIG_LIBDIR}")
+    set(ENV{PKG_CONFIG_PATH} "")
+endif()
+message(STATUS "11: env PKG_CONFIG_LIBDIR: $ENV{PKG_CONFIG_LIBDIR}")
+message(STATUS "10: env PKG_CONFIG_SYSROOT_DIR: $ENV{PKG_CONFIG_SYSROOT_DIR}")
+if(PKG_CONFIG_SYSROOT_DIR)
+    set(ENV{PKG_CONFIG_SYSROOT_DIR} "${PKG_CONFIG_SYSROOT_DIR}")
+endif()
+message(STATUS "11: env PKG_CONFIG_SYSROOT_DIR: $ENV{PKG_CONFIG_SYSROOT_DIR}")
 
 set(HAVE_RTKIT 0)
 if(NOT WIN32)
